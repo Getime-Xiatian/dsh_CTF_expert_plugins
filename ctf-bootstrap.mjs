@@ -92,6 +92,12 @@
  *     milestone). No output literal is auto-checked for completion anymore.
  *   - after the plan audit passes (ctf_review, review=DONE) the model writes
  *     the audited plan into tasks with todo_write before executing.
+ * v0.9.1: measured on a real session -- the model skipped the pure-prompt
+ *   todo_write step after ctf_review and probed directly. New plan->tasks gate:
+ *   while review=DONE but todo_write has not run, the tool catalog stays locked
+ *   to ctf_* + subagent + todo_write (no shell/file/probing); the first
+ *   todo_write (tools/result watchdog -> engine.markTasks) sets tasks=DONE and
+ *   unlocks execution. Phase 1 -> 2 (hunt) also requires tasksWritten.
  */
 
 import { createEngine, ENGINE_VERSION, HACK_VECTORS, CTF_SKILLS } from './ctf-engine.mjs'
@@ -185,12 +191,12 @@ const REVIEW_GUIDE = [
   '   concise audit (verdict + concrete deltas), never a restatement of the plan.',
   '   Wait for its report.',
   '4. Fold the findings into the plan and call ctf_review with the deltas so',
-  '   they merge into the stored plan record (plan=AUDITED, review=DONE unlocks',
-  '   the execution tools).',
+  '   they merge into the stored plan record (plan=AUDITED, review=DONE).',
   '5. Right after ctf_review, write the plan into tasks with todo_write',
-  '   (todo_write: one task per step of the audited plan), then execute the',
-  '   tasks in order; settle every environment interaction with ctf_step.',
-  'Do NOT run shell/file/probing tools and do NOT settle steps before review=DONE.',
+  '   (todo_write: one task per step of the audited plan) -- execution tools',
+  '   unlock only after tasks=DONE. Then execute the tasks in order; settle',
+  '   every environment interaction with ctf_step.',
+  'Do NOT run shell/file/probing tools until review=DONE AND tasks=DONE.',
 ].join('\n')
 
 /**
@@ -233,10 +239,33 @@ function isReviewTool(name) {
   return REVIEW_EXTRA_ALLOW.has(name)
 }
 
-/** Phase-1 USER-prompt guidance after review=DONE: standard mode rules (all English). */
+/** v0.9.1: 是否允许在 plan->tasks 门控期使用（= review 面 + todo_write）。 */
+function isTasksTool(name) {
+  return isReviewTool(name) || name === 'todo_write'
+}
+
+/**
+ * Phase-1 USER-prompt guidance between review=DONE and the first todo_write
+ * (v0.9.1 "tasks gate"). Measured on a real session: after ctf_review the model
+ * skipped the todo step and probed directly, so execution tools stay LOCKED
+ * until todo_write is called once -- the audited plan must be turned into
+ * concrete tasks first.
+ */
+const TASKS_GATE = [
+  '[CTF Expert / Phase 1 / plan -> tasks gate (user prompt; system stays the minimal persona)]',
+  'Review passed (plan=AUDITED, review=DONE). Before ANY execution, write the',
+  'audited plan into tasks with todo_write -- one todo per concrete step (probes,',
+  'reads, builds, verifications) with a clear status. Execution tools (shell,',
+  'file, probing) are LOCKED until todo_write is called once (tasks=DONE).',
+  'Then execute the tasks in order and settle every environment interaction with',
+  'ctf_step. Declare completion with ctf_complete once the user\'s objective is',
+  'met with real evidence.',
+].join('\n')
+
+/** Phase-1 USER-prompt guidance after review=DONE + todos written: standard mode rules (all English). */
 const STANDARD_GUIDE = [
   '[CTF Expert / Phase 1 / Standard mode / settlement rules (user prompt; system stays the minimal persona)]',
-  'Execution unlocked: your plan was audited and perfected by the subagent (review=DONE).',
+  'Execution unlocked: your plan was audited by the subagent (review=DONE) and written into tasks with todo_write (tasks=DONE).',
   'Think and reason in English.',
   'The full tool catalog is open. Autonomous path-finding rules:',
   '1. After EVERY environment interaction you MUST call ctf_step to settle it',
@@ -314,6 +343,8 @@ function statusText(st) {
   if (st.planSaved) line += st.planAudited
     ? ` plan=AUDITED${st.planDeltaCount > 0 ? ` deltas=${st.planDeltaCount}` : ''}`
     : ' plan=v1'
+  // v0.9.1: todo gate status (execution locked until the plan is written to tasks)
+  if (st.reviewState === 'done' && st.planSaved) line += ` tasks=${st.tasksWritten ? 'DONE' : 'PENDING'}`
   line += st.goalAchieved ? ' goal=ACHIEVED' : ' goal=PENDING'
   if (st.milestonesHit.length) line += ` milestones=[${st.milestonesHit.join(',')}]`
   if (st.pendingActions > 0) {
@@ -321,6 +352,9 @@ function statusText(st) {
   }
   if (st.phase === 1 && st.reviewState !== 'done') {
     line += '\n[!] Plan-review gate: execution tools are LOCKED until review=DONE. Call ctf_plan, dispatch a subagent to audit the plan, then call ctf_review with the deltas; after review=DONE write the plan into tasks with todo_write.'
+  }
+  if (st.phase === 1 && st.reviewState === 'done' && st.planSaved && !st.tasksWritten) {
+    line += '\n[!] Tasks gate: execution tools are LOCKED until todo_write is called once (tasks=DONE) -- write the audited plan into tasks now.'
   }
   if (st.lastDirective === 'BACKTRACK') {
     line += '\n[!] Loop-break: the current direction yields no gain. You MUST call ctf_backtrack to switch direction; do not repeat the same command.'
@@ -604,7 +638,7 @@ export function apply(ctx, config = {}) {
 
   registerTool({
     name: 'ctf_review',
-    description: 'Record that the round-1 plan review is COMPLETE: call AFTER the review subagent returned. Pass its concrete DELTAS so they merge into the stored plan record (plan=AUDITED); sets review=DONE and unlocks the execution tools (shell/file/probing). Mandatory before the first probe; while review=PENDING execution tools are locked.',
+    description: 'Record that the round-1 plan review is COMPLETE: call AFTER the review subagent returned. Pass its concrete DELTAS so they merge into the stored plan record (plan=AUDITED); sets review=DONE. Execution tools unlock only AFTER you then write the plan into tasks with todo_write (tasks=DONE); while review=PENDING or tasks=PENDING the shell/file/probing tools are locked.',
     parameters: {
       verdict: { type: 'string', description: 'subagent review outcome / what was improved in the plan', required: false },
       deltas: { type: 'string', description: 'the concrete audit deltas/findings to merge into the stored plan (one per line)', required: false },
@@ -619,7 +653,7 @@ export function apply(ctx, config = {}) {
       const merged = (plan && plan.deltas.length) ? ` plan deltas merged=${plan.deltas.length}` : ''
       return [
         statusText({ ...st, reviewState: 'done' }),
-        `ctf_review recorded: the plan was audited by a subagent${merged}. Execution unlocked -- write the plan into tasks with todo_write now, then run the first probe and settle its output with ctf_step.`,
+        `ctf_review recorded: the plan was audited by a subagent${merged}. Review=DONE -- now write the audited plan into tasks with todo_write (execution tools unlock after tasks=DONE), then run the first probe and settle its output with ctf_step.`,
       ].join('\n')
     },
   })
@@ -708,7 +742,14 @@ export function apply(ctx, config = {}) {
       if (eng === undefined) return
       const name = exec.name
       if (typeof name !== 'string') return
-      if (name.startsWith('ctf_') || name.startsWith('subagent') || name.startsWith('dev_')) return
+      // v0.9.1: the first todo_write marks the audited plan as written to tasks
+      // (unlocks the execution tools through the tasks gate).
+      if (name === 'todo_write') {
+        const changed = eng.markTasks()
+        if (changed) maybeSave(agent.id)
+        return
+      }
+      if (name.startsWith('ctf_') || name.startsWith('subagent') || name.startsWith('dev_') || name.startsWith('todo_')) return
       if (REVIEW_EXTRA_ALLOW.has(name)) return
       eng.noteAction(name, !!(result && result.isError))
     } catch { /* observer failures are isolated; tool results unaffected */ }
@@ -812,17 +853,20 @@ export function apply(ctx, config = {}) {
     if (toolCalled && eng.state.phase === 0) eng.advancePhase(1, 'standard')
     if (eng.state.phase === 1 &&
         eng.state.reviewState === 'done' &&
+        eng.state.tasksWritten &&                       // v0.9.1: todos written first
         (eng.state.milestonesHit.length > 0 || eng.state.stepCount >= cfg.phase2AfterSteps)) {
       eng.advancePhase(2, 'hunt')
     }
     maybeSave(session.id)
 
     const st = eng.status()
-    // Guide for the CURRENT phase (plus the review gate), as user prompt.
+    // Guide for the CURRENT phase/gate, as user prompt.
     let guide
     if (eng.state.phase === 0) guide = MINIMAL_GUIDE
-    else if (eng.state.phase === 1) guide = eng.state.reviewState === 'done' ? STANDARD_GUIDE : REVIEW_GUIDE
-    else guide = HUNT_GUIDE
+    else if (eng.state.phase === 1) {
+      if (eng.state.reviewState !== 'done') guide = REVIEW_GUIDE
+      else guide = eng.state.tasksWritten ? STANDARD_GUIDE : TASKS_GATE
+    } else guide = HUNT_GUIDE
     // Keep the phase/status guidance OUT of the system prompt: contexts are the
     // user-role channel. Status carries score/directive/goal every round.
     const contexts = [
@@ -863,8 +907,22 @@ export function apply(ctx, config = {}) {
       }
     }
 
-    // Phase 1 (review=DONE) / Phase 2: system stays the single persona
-    // sentence; full tool catalog; phase rules + live status ride contexts.
+    // Phase 1 -- plan->tasks gate (v0.9.1): review done but todo_write not yet
+    // called. Execution tools (shell/file/probing) stay LOCKED until the
+    // audited plan is written into tasks (todo_write). Measured fix: the model
+    // skipped the pure-prompt todo step and probed directly.
+    if (eng.state.phase === 1 && !eng.state.tasksWritten) {
+      return {
+        ...assembled,
+        sections,
+        contexts,
+        tools: (assembled.tools || []).filter((tool) => isTasksTool(tool.name)),
+      }
+    }
+
+    // Phase 1 (review=DONE + tasks=DONE) / Phase 2: system stays the single
+    // persona sentence; full tool catalog; phase rules + live status ride
+    // contexts.
     return { ...assembled, sections, contexts }
   })
 }

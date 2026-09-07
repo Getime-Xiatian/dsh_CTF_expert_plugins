@@ -1,4 +1,4 @@
-# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.9.0）
+# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.9.1）
 
 > [English](README.md) | **简体中文**
 
@@ -9,8 +9,9 @@
 **subagent 排查完善**后再解锁执行工具；完善后的 plan（v1 + audit deltas）**落账为结构化
 plan 记录**（v0.8.2）。
 **v0.9.0：去除 flag 验证环节**——目标完成 = **用户提示词目标完成**，由模型用新工具
-`ctf_complete` **显式声明**（goal=ACHIEVED / +10 里程碑）；plan audit 通过后先用
-`todo_write` 把计划写成任务再执行。
+`ctf_complete` **显式声明**（goal=ACHIEVED / +10 里程碑）。
+**v0.9.1：plan→tasks 门控**——audit 通过后必须先 `todo_write` 写计划任务（实测模型会
+跳过纯提示词步骤直接探测；现由工具面锁强制，tasks=DONE 才解锁执行工具）。
 插件所有 LLM 可见 prompt 均为英文，并在每个阶段强制 English thinking。
 
 > **v0.8.1 三修复（实测）**：① 极简产物步后经 `agent/turn-stopping` 自动唤醒进入 review
@@ -105,7 +106,7 @@ plan 记录**（v0.8.2）。
   session/event 推进 + tools/result 看门狗 + 可选持久化）
 - 设计文档 / 测试 / 变更溯源（`TRACE.md`）在工作区 `/home/xiatian/default/ctf-expert/`
 
-## 状态（v0.9.0）
+## 状态（v0.9.1）
 
 - [x] 引擎（分层奖励 / 步成本 / 重复指数惩罚 / 停滞 BACKTRACK / 一次性里程碑 / 快照恢复）
 - [x] 奖励黑客机制（`ctf_hack` + hackMode + 非常规攻击面向量库 + 乘数结算）
@@ -115,14 +116,15 @@ plan 记录**（v0.8.2）。
 - [x] **system 只注入内置 persona 一句，其余全部走用户提示词通道（v0.7.0）**
 - [x] **死循环修复 + Round-1 协议（v0.8.0）** + **v0.8.1 三修复（自动唤醒/exec 会话绑定/子代理跳过协议）**
 - [x] **结构化 plan 落账 + 去 flag-grep（v0.8.2）**
-- [x] **去除 flag 验证、目标完成 = 用户提示词目标 + ctf_complete 显式声明；audit 通过后 todo_write 写计划（v0.9.0）**
+- [x] **去除 flag 验证、目标完成 = 用户提示词目标 + ctf_complete 显式声明（v0.9.0）**
+- [x] **plan→tasks 门控（v0.9.1：audit 通过后先 todo_write 写计划，tasks=DONE 才解锁执行工具面）**
 - [x] 预设结构校验（31 rows，无重复 id）与真实挂载验证（standingKeyFor = MOUNT OK）
 - [ ] 最终验收：用户在 picker 开 CTF Expert 会话，确认 round-1 产物 → subagent 排查 → todo 执行 → ctf_complete 全链路
-- [x] 发布：代码已 push 到本仓库 `main`（v0.9.0 待推送）
+- [x] 发布：代码已 push 到本仓库 `main`（v0.9.1 待推送）
 
 ## 测试
 
 ```bash
-node test/engine.test.mjs      # 84 断言（奖励/惩罚/停滞/熔断/快照/哈希链/看门狗/reward-hack/技能/round-1门控/结构化plan/ctf_complete 目标声明）
-node test/bootstrap.sim.mjs    # 62 断言（工具注册 8 + session/event 推进 + review 门控工具锁 + todo 引导 + ctf_complete + 三阶段门控 + 持久化 + 看门狗 + 英文断言）
+node test/engine.test.mjs      # 90 断言（奖励/惩罚/停滞/熔断/快照/哈希链/看门狗/reward-hack/技能/round-1门控/结构化plan/ctf_complete 目标声明）
+node test/bootstrap.sim.mjs    # 65 断言（工具注册 8 + session/event 推进 + review 门控工具锁 + todo 引导 + ctf_complete + 三阶段门控 + 持久化 + 看门狗 + 英文断言）
 ```

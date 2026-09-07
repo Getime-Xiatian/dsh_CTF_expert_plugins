@@ -43,9 +43,11 @@
  * v0.9.0：**去除 flag 验证环节**——不再从输出字面量自动检测 FLAG 完成；终局 =
  *   用户提示词目标完成，由模型经 ctf_complete **显式声明**（goalCompleted +
  *   OBJECTIVE_COMPLETED +10.0 里程碑，受 reward-hack 乘数；幂等）。
+ * v0.9.1：audit 通过后到 todo 写计划之间新增执行门控字段 tasksWritten
+ *   （markTasks()）——实测模型会跳过纯提示词的 todo_write 步骤直接探测。
  */
 
-export const ENGINE_VERSION = '0.9.0'
+export const ENGINE_VERSION = '0.9.1'
 
 /** FNV-1a 32-bit（账本哈希链用；纯 JS 无依赖）。 */
 export function fnv1a(str) {
@@ -197,6 +199,7 @@ export function createEngine(sessionId, overrides = {}) {
     reviewDeltas: [],       // v0.8.2：audit 子代理返回、并入 plan 的 deltas
     goalCompleted: false,   // v0.9.0：用户提示词目标完成（ctf_complete 显式声明，替代 flag 验证）
     goalSummary: '',        // v0.9.0：目标完成声明摘要（证据链由会话/账本承载）
+    tasksWritten: false,    // v0.9.1：audit 通过后是否已用 todo_write 写计划任务（执行门控）
   }
 
   const norm = (cmd) => (cmd == null ? '' : String(cmd).replace(/\s+/g, ' ').trim())
@@ -259,6 +262,18 @@ export function createEngine(sessionId, overrides = {}) {
     if (state.productDelivered) return false
     state.productDelivered = true
     pushJournal({ type: 'product', phase: state.phase })
+    return true
+  }
+
+  /**
+   * v0.9.1：登记 audit 通过后的计划已写成 todo 任务（bootstrap 在 tools/result
+   * 收到 todo_write 时调用）——在写任务之前执行工具（shell/file/探测）保持锁定，
+   * 使 "audit 通过后先 todo 写计划再执行" 由工具面强制（实测模型会跳过纯提示词步骤）。
+   */
+  function markTasks() {
+    if (state.tasksWritten) return false
+    state.tasksWritten = true
+    pushJournal({ type: 'tasks', phase: state.phase })
     return true
   }
 
@@ -554,6 +569,7 @@ export function createEngine(sessionId, overrides = {}) {
       planAudited: !!(state.plan && state.plan.audited), // v0.8.2
       planSkill: (state.plan && state.plan.skill) || null, // v0.8.2
       planDeltaCount: state.reviewDeltas.length,        // v0.8.2
+      tasksWritten: state.tasksWritten,                  // v0.9.1：todo_write 已写计划
     }
   }
 
@@ -619,6 +635,7 @@ export function createEngine(sessionId, overrides = {}) {
       reviewDeltas: [...state.reviewDeltas],      // v0.8.2
       goalCompleted: state.goalCompleted,         // v0.9.0
       goalSummary: state.goalSummary,             // v0.9.0
+      tasksWritten: state.tasksWritten,           // v0.9.1
       config: {
         stepCost: cfg.stepCost, exploreBonus: cfg.exploreBonus,
         repeatBase: cfg.repeatBase, errorPenalty: cfg.errorPenalty,
@@ -683,6 +700,7 @@ export function createEngine(sessionId, overrides = {}) {
       // that reached goal=ACHIEVED via a FLAG literal carry it over.
       state.goalCompleted = !!snap.goalCompleted || (Array.isArray(snap.discovered) && snap.discovered.includes('FLAG_RETRIEVED'))
       state.goalSummary = str(snap.goalSummary, state.goalCompleted ? 'objective completed (legacy snapshot)' : '')
+      state.tasksWritten = !!snap.tasksWritten
       return true
     } catch {
       return false
@@ -694,6 +712,7 @@ export function createEngine(sessionId, overrides = {}) {
     cfg,
     advancePhase,
     markProduct,
+    markTasks,
     review,
     savePlan,
     planRecord,

@@ -1,4 +1,4 @@
-# CTF Expert - dsh CTF 能力插件 / Agent 预设 (v0.9.0)
+# CTF Expert - dsh CTF 能力插件 / Agent 预设 (v0.9.1)
 
 > **English** | [简体中文](README.zh-CN.md)
 
@@ -92,6 +92,14 @@ reward-hack multiplier applies, idempotent). No output literal is auto-checked
 for completion anymore. After the plan audit passes (ctf_review, review=DONE)
 the model writes the audited plan into tasks with `todo_write` before
 executing (see REVIEW_WAKE/REVIEW_GUIDE).
+
+v0.9.1 (measured on a real session): the model skipped the pure-prompt
+`todo_write` step after ctf_review and probed directly, so a **plan->tasks
+gate** now enforces it on the tool surface: while review=DONE but todo_write
+has not run, the catalog stays locked to ctf_* + subagent + todo_write (no
+shell/file/probing). The first `todo_write` (watched via tools/result ->
+engine.markTasks) sets tasks=DONE and unlocks execution; phase 1 -> 2 (hunt)
+also requires tasks=DONE.
 
 Why v0.8.0 exists: a measured CTF session dead-looped in phase 0 (the agent
 probed forever, never emitting the plan) because phase promotion read
