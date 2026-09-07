@@ -36,9 +36,12 @@
  *   subagent 排查完善（productDelivered / reviewState 门控），完善后才解锁执行；
  *   引擎只记账门控状态，tick 奖励数学不变（执行门控由 bootstrap 工具面实施）。
  * v0.8.1：插件版本随 bootstrap 修复对齐（本文件逻辑未变）。
+ * v0.8.2：结构化 plan 记录（state.plan 全文本 + objective/hypothesis/firstProbe/
+ *   milestone/skill）——ctf_plan 存初版、ctf_review(audit 通过) 把 audit deltas 并入
+ *   plan 并标记 audited，账本持有"完善后的 plan"，不再只是会话纯文本。
  */
 
-export const ENGINE_VERSION = '0.8.1'
+export const ENGINE_VERSION = '0.8.2'
 
 /** FNV-1a 32-bit（账本哈希链用；纯 JS 无依赖）。 */
 export function fnv1a(str) {
@@ -184,6 +187,8 @@ export function createEngine(sessionId, overrides = {}) {
     lastSkill: null,        // 最近一次 ctf_plan 声明的技能（"which skill used"）
     productDelivered: false, // v0.8.0：极简一轮思考产物（plan+skill 文本）是否已交付
     reviewState: 'pending', // v0.8.0：plan 的 subagent 排查门控 'pending' | 'done'
+    plan: null,             // v0.8.2：结构化 round-1 plan 记录（全文本 + audit 合并）
+    reviewDeltas: [],       // v0.8.2：audit 子代理返回、并入 plan 的 deltas
   }
 
   const norm = (cmd) => (cmd == null ? '' : String(cmd).replace(/\s+/g, ' ').trim())
@@ -252,12 +257,76 @@ export function createEngine(sessionId, overrides = {}) {
   /**
    * v0.8.0：subagent 排查完成 → reviewState='done'，解除执行门控。
    * bootstrap 在 ctf_review 工具中调用；状态跨重启随 snapshot 保存。
+   * v0.8.2：deltas（audit 子代理的修正）并入结构化 plan 记录并标记 audited，
+   * 使 audit 通过后的 plan（修正版）落在账本里，而不只是会话纯文本。
    */
-  function review({ verdict = '' } = {}) {
-    if (state.reviewState === 'done') return status()
+  function review({ verdict = '', deltas = '' } = {}) {
+    const firstTime = state.reviewState !== 'done'
     state.reviewState = 'done'
-    pushJournal({ type: 'review', verdict: String(verdict).slice(0, 300) })
+    const merged = mergePlanDeltas(deltas)
+    if (!firstTime && merged === 0 && !String(verdict)) return status() // repeated no-op call
+    pushJournal({ type: 'review', verdict: String(verdict).slice(0, 300), mergedDeltas: merged })
+    if (firstTime && state.plan !== null) state.plan.audited = true
     return status()
+  }
+
+  /** 归一化 audit deltas（字符串按行 / 数组逐条），截断并追加到 plan/reviewDeltas。 */
+  function mergePlanDeltas(deltas) {
+    const raw = Array.isArray(deltas)
+      ? deltas.map((d) => String(d))
+      : String(deltas || '').split(/\n+/).map((l) => l.trim()).filter(Boolean)
+    const capped = raw.map((d) => d.slice(0, 400)).filter(Boolean).slice(0, 20)
+    if (capped.length === 0) return 0
+    state.reviewDeltas.push(...capped)
+    if (state.reviewDeltas.length > 60) {
+      state.reviewDeltas.splice(0, state.reviewDeltas.length - 60)
+    }
+    if (state.plan !== null) {
+      state.plan.deltas = [...state.reviewDeltas]
+    }
+    pushJournal({ type: 'plan-deltas', added: capped.length })
+    return capped.length
+  }
+
+  /**
+   * v0.8.2：保存结构化 round-1 plan 记录（极简轮产物文本 + 结构化字段）。
+   * 记录一经保存即成为该会话的"当前 plan"，audit（review）通过后并入 deltas。
+   * 纯数据，随 snapshot/restore 持久；不替代 branches（ToT-lite 分支记录保留）。
+   */
+  function savePlan({ text = '', objective = '', hypothesis = '', firstProbe = '', milestone = '', skill = '' } = {}) {
+    const sid = typeof skill === 'string' ? skill.slice(0, 60) : ''
+    const clean = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '')
+    const prev = state.plan
+    const plan = {
+      text: clean(text, 6000),
+      objective: clean(objective, 500),
+      hypothesis: clean(hypothesis, 500),
+      firstProbe: clean(firstProbe, 500),
+      milestone: clean(milestone, 500),
+      skill: sid || (prev && prev.skill) || '',
+      audited: !!(prev && prev.audited),
+      deltas: state.reviewDeltas.length ? [...state.reviewDeltas] : (prev && prev.deltas ? [...prev.deltas] : []),
+    }
+    state.plan = plan
+    if (sid) state.lastSkill = sid
+    pushJournal({ type: 'plan-saved', skill: sid, textChars: plan.text.length })
+    return planRecord()
+  }
+
+  /** 当前结构化 plan 记录（完整纯数据；无 plan 返回 null）。 */
+  function planRecord() {
+    if (state.plan === null) return null
+    const p = state.plan
+    return {
+      text: p.text,
+      objective: p.objective,
+      hypothesis: p.hypothesis,
+      firstProbe: p.firstProbe,
+      milestone: p.milestone,
+      skill: p.skill,
+      audited: !!p.audited,
+      deltas: [...p.deltas],
+    }
   }
 
   /**
@@ -449,6 +518,10 @@ export function createEngine(sessionId, overrides = {}) {
       goalAchieved: state.discovered.includes('FLAG_RETRIEVED'), // 终局保证位
       productDelivered: state.productDelivered,         // v0.8.0 round-1 产物门控
       reviewState: state.reviewState,                   // v0.8.0 'pending' | 'done'
+      planSaved: state.plan !== null,                   // v0.8.2
+      planAudited: !!(state.plan && state.plan.audited), // v0.8.2
+      planSkill: (state.plan && state.plan.skill) || null, // v0.8.2
+      planDeltaCount: state.reviewDeltas.length,        // v0.8.2
     }
   }
 
@@ -501,6 +574,17 @@ export function createEngine(sessionId, overrides = {}) {
       lastSkill: state.lastSkill,
       productDelivered: state.productDelivered,   // v0.8.0
       reviewState: state.reviewState,             // v0.8.0
+      plan: state.plan === null ? null : {        // v0.8.2
+        text: state.plan.text,
+        objective: state.plan.objective,
+        hypothesis: state.plan.hypothesis,
+        firstProbe: state.plan.firstProbe,
+        milestone: state.plan.milestone,
+        skill: state.plan.skill,
+        audited: !!state.plan.audited,
+        deltas: [...state.plan.deltas],
+      },
+      reviewDeltas: [...state.reviewDeltas],      // v0.8.2
       config: {
         stepCost: cfg.stepCost, exploreBonus: cfg.exploreBonus,
         repeatBase: cfg.repeatBase, errorPenalty: cfg.errorPenalty,
@@ -543,6 +627,24 @@ export function createEngine(sessionId, overrides = {}) {
       state.lastSkill = str(snap.lastSkill, null)
       state.productDelivered = !!snap.productDelivered
       state.reviewState = snap.reviewState === 'done' ? 'done' : 'pending'
+      // v0.8.2: structured plan + audit deltas survive restart
+      const pl = snap.plan
+      if (pl && typeof pl === 'object') {
+        const s = (v, d) => (typeof v === 'string' ? v : d)
+        state.plan = {
+          text: s(pl.text, ''),
+          objective: s(pl.objective, ''),
+          hypothesis: s(pl.hypothesis, ''),
+          firstProbe: s(pl.firstProbe, ''),
+          milestone: s(pl.milestone, ''),
+          skill: s(pl.skill, ''),
+          audited: !!pl.audited,
+          deltas: Array.isArray(pl.deltas) ? pl.deltas.filter((d) => typeof d === 'string') : [],
+        }
+      } else {
+        state.plan = null
+      }
+      state.reviewDeltas = Array.isArray(snap.reviewDeltas) ? snap.reviewDeltas.filter((d) => typeof d === 'string') : []
       return true
     } catch {
       return false
@@ -555,6 +657,8 @@ export function createEngine(sessionId, overrides = {}) {
     advancePhase,
     markProduct,
     review,
+    savePlan,
+    planRecord,
     tick,
     backtrack,
     plan,

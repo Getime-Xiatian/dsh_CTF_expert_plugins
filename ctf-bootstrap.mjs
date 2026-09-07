@@ -74,6 +74,18 @@
  *      protocol/guidance/tool-gating for delegated sessions (origin=subagent /
  *      delegationDepth>0), keeping them plain workers; the audit prompt also
  *      demands a concise verdict with deltas, not a plan restatement.
+ * v0.8.2: two refinements on live feedback --
+ *   a. the round-1 plan (currently pure conversation text) becomes a durable
+ *      STRUCTURED plan record in the engine ledger: ctf_plan stores the full
+ *      plan text + objective/hypothesis/firstProbe/milestone/skill; when the
+ *      audit passes, ctf_review merges the audit deltas into that record and
+ *      marks it audited, so the finalized plan (v1 + audit deltas) is part of
+ *      the ledger (readable via ctf_status / ctf_export), not just text.
+ *   b. goal framing is heuristic "complete the challenge objective" (e.g. full
+ *      exploit chain / privilege path); prompts no longer steer toward literal
+ *      "ctf{/flag{" string hunting -- blind greps for such markers are
+ *      explicitly forbidden, and flag text counts only as final confirmation
+ *      when real command output shows it (detection regex untouched).
  */
 
 import { createEngine, ENGINE_VERSION, HACK_VECTORS, CTF_SKILLS } from './ctf-engine.mjs'
@@ -124,6 +136,10 @@ const SKILL_IDS = CTF_SKILLS.map((s) => s.id).join(', ')
 const MINIMAL_GUIDE = [
   'CTF Expert minimal round (injected as a user prompt; the system prompt stays the built-in minimal persona only).',
   'Think and reason in English.',
+  'Goal framing: complete the challenge OBJECTIVE heuristically (e.g. the full',
+  'exploit chain / privilege path / code-execution evidence). Flag text is only',
+  'the FINAL confirmation when real command output shows it -- never a string to',
+  'blind-grep for.',
   'This round is DEEP THINKING only. Do not rush to a conclusion and do not act yet:',
   'this round has no tool use (no shell, no file editor, no probes).',
   'Deliver this round\'s required product as plain text -- your whole reply:',
@@ -135,8 +151,9 @@ const MINIMAL_GUIDE = [
   '"which skill used:").',
   'After this round a subagent audits and perfects your plan before any execution',
   'starts; you will be told when execution is unlocked.',
-  'Forbidden in this round: aimless scanning, tool calls, repeating checks, or',
-  'widening the attack surface without evidence.',
+  'Forbidden in this round: tool calls, aimless scanning, repeating checks,',
+  'widening the attack surface without evidence, and blind greps or searches for',
+  'literal "ctf{" / "flag{" / "secret" markers.',
 ].join('\n')
 
 /**
@@ -151,8 +168,9 @@ const REVIEW_GUIDE = [
   'plan. Execution tools (shell/file/probing) are LOCKED until review=DONE.',
   'Do these in order:',
   '1. If you did not yet write the plan + which skill used as text, write it now.',
-  '2. Persist the plan with ctf_plan: objective, hypothesis, firstProbe, and the',
-  '   skill (narrowest fit for the dominant evidence surface: ' + SKILL_IDS + ').',
+  '2. Persist the plan with ctf_plan: the full plan text plus objective,',
+  '   hypothesis, firstProbe, milestone and the skill (narrowest fit for the',
+  '   dominant evidence surface: ' + SKILL_IDS + ').',
   '3. Dispatch ONE subagent with the subagent tool and set run_in_background to',
   '   false. Give it the challenge facts you have plus your full plan + which',
   '   skill used, and instruct it to AUDIT and PERFECT the plan: holes in the',
@@ -160,7 +178,8 @@ const REVIEW_GUIDE = [
   '   whether the chosen skill is the narrowest fit. Tell it to return ONLY a',
   '   concise audit (verdict + concrete deltas), never a restatement of the plan.',
   '   Wait for its report.',
-  '4. Fold the findings into your plan and call ctf_review (review=DONE unlocks',
+  '4. Fold the findings into the plan and call ctf_review with the deltas so',
+  '   they merge into the stored plan record (plan=AUDITED, review=DONE unlocks',
   '   the execution tools).',
   'Do NOT run shell/file/probing tools and do NOT settle steps before review=DONE.',
 ].join('\n')
@@ -173,13 +192,15 @@ const REVIEW_GUIDE = [
 const REVIEW_WAKE = [
   '[CTF Expert / Round-1 product received] Execution is not unlocked yet.',
   'Audit the plan before any probe:',
-  '1. Persist it with ctf_plan (objective, hypothesis, firstProbe, skill).',
+  '1. Persist it with ctf_plan: full plan text + objective, hypothesis,',
+  '   firstProbe, milestone, skill.',
   '2. Dispatch ONE subagent (subagent tool, run_in_background: false) with your',
   '   plan + which skill used; ask it to audit and perfect the plan (holes in',
   '   the hypothesis, a better first probe, a sharper milestone, skill fit).',
   '   Tell it to return ONLY a concise audit (verdict + concrete deltas), never',
   '   a restatement of the plan.',
-  '3. Fold its findings into the plan and call ctf_review to unlock execution.',
+  '3. Fold its findings into the plan and call ctf_review with the deltas so',
+  '   they merge into the stored plan record (plan=AUDITED, execution unlocks).',
   'Then run the first probe and settle its output with ctf_step.',
 ].join('\n')
 
@@ -224,9 +245,13 @@ const STANDARD_GUIDE = [
   '   supply chain, privilege edges, side channels, questioning challenge',
   '   assumptions) and find real vulnerabilities or shortcuts. Evidence must come',
   '   from real command output, never self-report.',
-  'Final-goal guarantee: you MUST NOT declare the task complete before flag',
-  'evidence is settled (goal=ACHIEVED). Keep probing, switching skills or branches.',
-  'Goal: keep totalScore rising until you retrieve the flag.',
+  'Goal framing: complete the challenge OBJECTIVE heuristically -- real technical',
+  'progress (new services / confirmed vulns / access / hashes) is the goal; the',
+  'flag is only the FINAL confirmation when real command output shows it.',
+  'Do NOT blind-grep or blind-search literal "ctf{" / "flag{" / "secret" markers,',
+  'and never self-report flag evidence.',
+  'Final-goal guarantee: you MUST NOT declare the task complete before',
+  'goal=ACHIEVED. Keep probing, switching skills or branches.',
 ].join('\n')
 
 /** Phase-2 USER-prompt guidance: hunt mode rules (PDF P5-P7; all English). */
@@ -255,8 +280,11 @@ const HUNT_GUIDE = [
   'caches / privilege edges / side-channel differences / "the challenge assumption',
   'itself is wrong"). A real unconventional breakthrough pays as a real milestone',
   '(reward-hack milestones may carry a multiplier).',
-  'Endgame: after retrieving the flag call ctf_export to export the ledger as the',
-  'completion evidence chain; do NOT declare completion before goal=ACHIEVED.',
+  'Goal framing: complete the challenge objective heuristically -- never',
+  'blind-grep literal "ctf{" / "flag{" / "secret" markers.',
+  'Endgame: once the objective is completed and real output confirms the flag,',
+  'call ctf_export to export the ledger as the completion evidence chain; do NOT',
+  'declare completion before goal=ACHIEVED.',
 ].join('\n')
 
 /** One-line live status injected every round through the user contexts channel. */
@@ -268,13 +296,17 @@ function statusText(st) {
   if (st.hackMode) line += ' hackMode=ON'
   if (st.lastSkill) line += ` skill=${st.lastSkill}`
   if (st.productDelivered) line += ' product=DELIVERED'
+  // v0.8.2: structured plan record status (saved / audited / delta count)
+  if (st.planSaved) line += st.planAudited
+    ? ` plan=AUDITED${st.planDeltaCount > 0 ? ` deltas=${st.planDeltaCount}` : ''}`
+    : ' plan=v1'
   line += st.goalAchieved ? ' goal=ACHIEVED' : ' goal=PENDING'
   if (st.milestonesHit.length) line += ` milestones=[${st.milestonesHit.join(',')}]`
   if (st.pendingActions > 0) {
     line += ` unsettled=${st.pendingActions}`
   }
   if (st.phase === 1 && st.reviewState !== 'done') {
-    line += '\n[!] Plan-review gate: execution tools are LOCKED until review=DONE. Call ctf_plan, dispatch a subagent to audit the plan, then call ctf_review.'
+    line += '\n[!] Plan-review gate: execution tools are LOCKED until review=DONE. Call ctf_plan, dispatch a subagent to audit the plan, then call ctf_review with the deltas.'
   }
   if (st.lastDirective === 'BACKTRACK') {
     line += '\n[!] Loop-break: the current direction yields no gain. You MUST call ctf_backtrack to switch direction; do not repeat the same command.'
@@ -286,7 +318,7 @@ function statusText(st) {
     line += '\n[!] Discipline: environment actions not settled via ctf_step; the next settle deducts 0.05 each. Settle after every environment interaction.'
   }
   if (!st.goalAchieved) {
-    line += '\n[GOAL] Final-goal guarantee: no flag evidence yet. Do not declare completion before GOAL_ACHIEVED -- keep probing or switch skills until ctf_status shows goal=ACHIEVED.'
+    line += '\n[GOAL] Complete the challenge objective heuristically: real technical progress is the goal. Do NOT blind-grep literal "ctf{" / "flag{" markers; the flag is only the final confirmation when real output shows it. Do not declare completion before GOAL_ACHIEVED -- keep probing or switch skills until ctf_status shows goal=ACHIEVED.'
   }
   return line
 }
@@ -447,19 +479,27 @@ export function apply(ctx, config = {}) {
 
   registerTool({
     name: 'ctf_status',
-    description: 'Show the CTF Expert ledger: current phase, totalScore, step/stagnation counters, milestone history, pending directive. Call it whenever you need your live score or before choosing the next move.',
+    description: 'Show the CTF Expert ledger: current phase, totalScore, step/stagnation counters, milestone history, pending directive, and the structured round-1 plan record (v1/audited/deltas). Call it whenever you need your live score or before choosing the next move.',
     parameters: {},
     execute(_args, exec) {
       const session = sessionFor(exec)
       if (!session) return 'no agent session'
-      const st = engineFor(session.id).status()
-      return [
+      const eng = engineFor(session.id)
+      const st = eng.status()
+      const lines = [
         statusText(st),
         `engine=${ENGINE_VERSION} discovered=[${st.discovered.join(',') || '-'}] branches=${st.branches}`,
         'Skill routing (which skill used; taxonomy borrowed from zhaoxuya520/reverse-skill): ' +
           CTF_SKILLS.map((s) => `${s.id}=${s.label}`).join(' | '),
-        'Rules summary: round 1 delivers plan + which skill used, a subagent audits the plan (ctf_plan -> subagent -> ctf_review), then execution unlocks; call ctf_step after every environment interaction; 3 stagnant steps trigger BACKTRACK (ctf_backtrack first, then switch direction); each milestone settles once; do not declare completion before goal=ACHIEVED.',
-      ].join('\n')
+        'Rules summary: round 1 delivers plan + which skill used, a subagent audits the plan (ctf_plan -> subagent -> ctf_review with deltas), then execution unlocks; call ctf_step after every environment interaction; 3 stagnant steps trigger BACKTRACK (ctf_backtrack first, then switch direction); each milestone settles once; do not declare completion before goal=ACHIEVED.',
+      ]
+      const plan = eng.planRecord()
+      if (plan !== null) {
+        lines.push(`plan(record): audited=${plan.audited ? 'yes' : 'no'} skill=${plan.skill || '-'} deltas=${plan.deltas.length} chars=${plan.text.length}`)
+        lines.push(`plan.objective: ${plan.objective.slice(0, 160) || '-'}`)
+        if (plan.milestone) lines.push(`plan.milestone: ${plan.milestone.slice(0, 160)}`)
+      }
+      return lines.join('\n')
     },
   })
 
@@ -517,38 +557,55 @@ export function apply(ctx, config = {}) {
 
   registerTool({
     name: 'ctf_plan',
-    description: 'Record one exploration branch/plan (autonomous path-finding evidence + which-skill-used). Pass objective/hypothesis/firstProbe AND the skill (one of the CTF_SKILLS ids: ' + CTF_SKILLS.map((s) => s.id).join(', ') + ') you will use on this branch. Use it whenever you switch to a new branch (and to persist the plan from the minimal round).',
+    description: 'Persist the structured round-1 plan (v0.8.2): pass the full plan TEXT plus objective/hypothesis/firstProbe/milestone and the skill (one of: ' + CTF_SKILLS.map((s) => s.id).join(', ') + '). Use it in the review gate to store the minimal-round product, and whenever you switch to a new branch (objective + which skill used).',
     parameters: {
-      objective: { type: 'string', description: 'what this branch tries to achieve', required: false },
+      text: { type: 'string', description: 'full plain-text plan (as written in the minimal round / refined draft)', required: false },
+      objective: { type: 'string', description: 'what this plan tries to achieve', required: false },
       hypothesis: { type: 'string', description: 'the assumption being tested', required: false },
       firstProbe: { type: 'string', description: 'the first validating action', required: false },
+      milestone: { type: 'string', description: 'exact output that would count as progress', required: false },
       skill: { type: 'string', description: 'which skill used (CTF_SKILLS id, e.g. web-runtime / reverse-pwn / crypto-mobile / identity-windows / cloud-container / pcap-protocol / stego-forensic / patch-diff / code-audit / malware-config / zip-archive / llm-agent)', required: false },
     },
     execute(args, exec) {
       const session = sessionFor(exec)
       if (!session) return 'no agent session'
       const eng = engineFor(session.id)
-      const res = eng.plan(args)
+      const res = eng.plan({ objective: args.objective, hypothesis: args.hypothesis, firstProbe: args.firstProbe, skill: args.skill })
+      let saved = ''
+      if (args.text || args.milestone || args.objective || args.hypothesis || args.firstProbe) {
+        const record = eng.savePlan({
+          text: args.text, objective: args.objective, hypothesis: args.hypothesis,
+          firstProbe: args.firstProbe, milestone: args.milestone, skill: args.skill,
+        })
+        saved = ` plan=SAVED${record && record.audited ? ' audited' : ''} milestone=${(record && record.milestone) ? 'set' : 'not-set'}`
+      }
       maybeSave(session.id)
-      return `Branch #${res.branches} recorded (phase=${res.phase} ${res.phaseName}) skill=${res.skill || '(not declared)'}. Run the first probe, then settle its output with ctf_step.`
+      const gate = eng.state.phase === 1 && eng.state.reviewState !== 'done'
+      const next = gate
+        ? 'Next: dispatch the audit subagent, then ctf_review with the deltas.'
+        : 'Run the first probe, then settle its output with ctf_step.'
+      return `Branch #${res.branches} recorded (phase=${res.phase} ${res.phaseName}) skill=${res.skill || '(not declared)'}.${saved} ${next}`
     },
   })
 
   registerTool({
     name: 'ctf_review',
-    description: 'Record that the round-1 plan review is COMPLETE: call AFTER the review subagent returned and you folded its findings into the plan. Sets review=DONE and unlocks the execution tools (shell/file/probing). Mandatory before the first probe; while review=PENDING execution tools are locked.',
+    description: 'Record that the round-1 plan review is COMPLETE: call AFTER the review subagent returned. Pass its concrete DELTAS so they merge into the stored plan record (plan=AUDITED); sets review=DONE and unlocks the execution tools (shell/file/probing). Mandatory before the first probe; while review=PENDING execution tools are locked.',
     parameters: {
       verdict: { type: 'string', description: 'subagent review outcome / what was improved in the plan', required: false },
+      deltas: { type: 'string', description: 'the concrete audit deltas/findings to merge into the stored plan (one per line)', required: false },
     },
     execute(args, exec) {
       const session = sessionFor(exec)
       if (!session) return 'no agent session'
       const eng = engineFor(session.id)
-      const st = eng.review({ verdict: args.verdict })
+      const st = eng.review({ verdict: args.verdict, deltas: args.deltas })
       maybeSave(session.id)
+      const plan = eng.planRecord()
+      const merged = (plan && plan.deltas.length) ? ` plan deltas merged=${plan.deltas.length}` : ''
       return [
         statusText({ ...st, reviewState: 'done' }),
-        'ctf_review recorded: the plan was audited by a subagent. Execution unlocked -- run the first probe now, then settle its output with ctf_step.',
+        `ctf_review recorded: the plan was audited by a subagent${merged}. Execution unlocked -- run the first probe now, then settle its output with ctf_step.`,
       ].join('\n')
     },
   })

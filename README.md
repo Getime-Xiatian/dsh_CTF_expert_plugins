@@ -1,4 +1,4 @@
-# CTF Expert - dsh CTF 能力插件 / Agent 预设 (v0.8.1)
+# CTF Expert - dsh CTF 能力插件 / Agent 预设 (v0.8.2)
 
 > **English** | [简体中文](README.zh-CN.md)
 
@@ -72,6 +72,18 @@ scope); (3) delegated (subagent) children now skip ALL CTF protocol/guidance
 (`isDelegated()`: origin=subagent / delegationDepth>0), so the plan-audit
 subagent returns a concise verdict with deltas instead of re-outputting the
 plan, and the audit prompt demands deltas only.
+
+v0.8.2 refinements: (a) the round-1 plan is now a durable STRUCTURED plan
+record in the engine ledger -- `ctf_plan` stores the full plan text +
+objective/hypothesis/firstProbe/milestone/skill (v1), and `ctf_review` merges
+the audit deltas into that record and marks it audited (plan=AUDITED), so the
+finalized plan lives in the ledger (readable via ctf_status / ctf_export /
+ledger persistence), not just in conversation text; (b) goal framing is
+heuristic "complete the challenge objective" (e.g. the full exploit chain) --
+prompts/status no longer steer toward literal `ctf{`/`flag{` string hunting
+(blind greps for such markers are explicitly forbidden; the flag only counts
+as final confirmation when real command output shows it; detection regex
+untouched).
 
 Why v0.8.0 exists: a measured CTF session dead-looped in phase 0 (the agent
 probed forever, never emitting the plan) because phase promotion read

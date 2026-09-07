@@ -1,4 +1,4 @@
-# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.8.1）
+# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.8.2）
 
 > [English](README.md) | **简体中文**
 
@@ -6,7 +6,8 @@
 为 Agent 预设 `CTF Expert` 提供一套**奖励惩罚机制**（专注最大得分）+ **自主探路** +
 **loop 熔断** + **技能路由（which skill used）** + **终局保证**（goal=ACHIEVED 前不得宣告完成）。
 **Round-1 协议**：极简深思考轮先产出 plan + which skill used（纯文本），由
-**subagent 排查完善**后再解锁执行工具。
+**subagent 排查完善**后再解锁执行工具；完善后的 plan（v1 + audit deltas）**落账为结构化
+plan 记录**（v0.8.2）。
 插件所有 LLM 可见 prompt 均为英文，并在每个阶段强制 English thinking。
 
 > **v0.8.1 三修复（实测）**：① 极简产物步后经 `agent/turn-stopping` 自动唤醒进入 review
@@ -14,6 +15,12 @@
 > 运行时 `exec.agent.session` 绑定会话（旧版 "no agent session"）；③ 委托子代理
 > （origin=subagent / delegationDepth>0）跳过全部 CTF 协议——audit 子代理只回
 > verdict + deltas，不再复述整份 plan。
+
+> **v0.8.2 细化**：① plan 落账——`ctf_plan` 存结构化初版（text/objective/hypothesis/
+> firstProbe/milestone/skill），audit 通过后 `ctf_review` 把 deltas 并入并置
+> plan=AUDITED（`ctf_status`/`ctf_export`/账本持久化可读回）；② 目标框架去 flag-grep——
+> 目标是**启发式完成挑战目标**（完整利用链/提权证据），flag 仅是真实输出时的终局确认，
+> 明令禁止盲扫 `ctf{`/`flag{` 字面量（检测正则不变）。
 
 ## 安装
 
