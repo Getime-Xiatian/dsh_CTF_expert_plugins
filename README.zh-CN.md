@@ -99,7 +99,7 @@
 - [x] **死循环修复 + Round-1 协议（v0.8.0：session/event 推进 + review 门控工具面锁 + ctf_review）**
 - [x] 预设结构校验（31 rows，无重复 id）与真实挂载验证（standingKeyFor = MOUNT OK）
 - [ ] 最终验收：用户在 picker 开 CTF Expert 会话，确认 round-1 产物 → subagent 排查 → 执行 全链路
-- [x] 发布：代码已 push 到本仓库 `main`（v0.8.0 待再次推送）
+- [x] 发布：代码已 push 到本仓库 `main`（v0.8.0，commit `d8ed52d`）
 
 ## 测试
 
