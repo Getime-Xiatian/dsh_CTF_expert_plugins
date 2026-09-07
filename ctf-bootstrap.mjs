@@ -86,6 +86,12 @@
  *      "ctf{/flag{" string hunting -- blind greps for such markers are
  *      explicitly forbidden, and flag text counts only as final confirmation
  *      when real command output shows it (detection regex untouched).
+ * v0.9.0: remove the flag-verification stage entirely --
+ *   - completion = the USER-prompt objective completed; the model declares it
+ *     explicitly via the new ctf_complete tool (goal=ACHIEVED; OBJECTIVE_COMPLETED
+ *     milestone). No output literal is auto-checked for completion anymore.
+ *   - after the plan audit passes (ctf_review, review=DONE) the model writes
+ *     the audited plan into tasks with todo_write before executing.
  */
 
 import { createEngine, ENGINE_VERSION, HACK_VECTORS, CTF_SKILLS } from './ctf-engine.mjs'
@@ -136,10 +142,10 @@ const SKILL_IDS = CTF_SKILLS.map((s) => s.id).join(', ')
 const MINIMAL_GUIDE = [
   'CTF Expert minimal round (injected as a user prompt; the system prompt stays the built-in minimal persona only).',
   'Think and reason in English.',
-  'Goal framing: complete the challenge OBJECTIVE heuristically (e.g. the full',
-  'exploit chain / privilege path / code-execution evidence). Flag text is only',
-  'the FINAL confirmation when real command output shows it -- never a string to',
-  'blind-grep for.',
+  'Goal framing (v0.9.0): complete the USER\'s stated objective heuristically',
+  '(e.g. the full exploit chain / privilege path / code-execution evidence).',
+  'There is no automatic flag verification: you declare completion yourself,',
+  'with real evidence, once the objective is met.',
   'This round is DEEP THINKING only. Do not rush to a conclusion and do not act yet:',
   'this round has no tool use (no shell, no file editor, no probes).',
   'Deliver this round\'s required product as plain text -- your whole reply:',
@@ -181,6 +187,9 @@ const REVIEW_GUIDE = [
   '4. Fold the findings into the plan and call ctf_review with the deltas so',
   '   they merge into the stored plan record (plan=AUDITED, review=DONE unlocks',
   '   the execution tools).',
+  '5. Right after ctf_review, write the plan into tasks with todo_write',
+  '   (todo_write: one task per step of the audited plan), then execute the',
+  '   tasks in order; settle every environment interaction with ctf_step.',
   'Do NOT run shell/file/probing tools and do NOT settle steps before review=DONE.',
 ].join('\n')
 
@@ -201,7 +210,10 @@ const REVIEW_WAKE = [
   '   a restatement of the plan.',
   '3. Fold its findings into the plan and call ctf_review with the deltas so',
   '   they merge into the stored plan record (plan=AUDITED, execution unlocks).',
-  'Then run the first probe and settle its output with ctf_step.',
+  '4. Then write the plan into tasks with todo_write (one todo per step of the',
+  '   audited plan), and execute them in order.',
+  'Settle every environment interaction with ctf_step; declare completion with',
+  'ctf_complete once the user\'s objective is met with real evidence.',
 ].join('\n')
 
 /**
@@ -241,17 +253,18 @@ const STANDARD_GUIDE = [
   '   ' + SKILL_IDS + '.',
   '6. Score is the only goal. When the conventional path stalls or a faster one',
   '   exists, unconventional thinking is allowed and encouraged -- use ctf_hack to',
-  '   widen the attack surface (scoring/judging/Oracle/flag delivery, hidden data,',
-  '   supply chain, privilege edges, side channels, questioning challenge',
+  '   widen the attack surface (scoring/judging/Oracle/artifact-delivery, hidden',
+  '   data, supply chain, privilege edges, side channels, questioning challenge',
   '   assumptions) and find real vulnerabilities or shortcuts. Evidence must come',
   '   from real command output, never self-report.',
-  'Goal framing: complete the challenge OBJECTIVE heuristically -- real technical',
-  'progress (new services / confirmed vulns / access / hashes) is the goal; the',
-  'flag is only the FINAL confirmation when real command output shows it.',
-  'Do NOT blind-grep or blind-search literal "ctf{" / "flag{" / "secret" markers,',
-  'and never self-report flag evidence.',
-  'Final-goal guarantee: you MUST NOT declare the task complete before',
-  'goal=ACHIEVED. Keep probing, switching skills or branches.',
+  'Goal framing (v0.9.0): complete the USER\'s stated objective heuristically --',
+  'real technical progress (new services / confirmed vulns / access / hashes) is',
+  'the goal; there is NO automatic flag verification. Do NOT blind-grep or',
+  'blind-search literal "ctf{" / "flag{" / "secret" markers, and never self-report',
+  'evidence.',
+  'Final-goal guarantee: declare completion with ctf_complete (goal=ACHIEVED) only',
+  'after you have actually fulfilled the user\'s stated objective and have real',
+  'evidence for it. Keep probing / switching skills until then.',
 ].join('\n')
 
 /** Phase-2 USER-prompt guidance: hunt mode rules (PDF P5-P7; all English). */
@@ -259,11 +272,11 @@ const HUNT_GUIDE = [
   '[CTF Expert / Phase 2 / Hunt mode / reward/penalty regime active (user prompt; system stays the minimal persona)]',
   'Think and reason in English.',
   'Scoring: first new service/port +1.0 / confirmed vulnerability +2.0 / hash',
-  'extracted +2.0 / access gained +3.0 / flag retrieved +10.0.',
+  'extracted +2.0 / access gained +3.0 / user objective completed +10.0.',
   'First-seen command combination +0.1 (exploration bonus); each step -0.05;',
   'consecutive repeats -0.2/-0.4/-0.8 (exponential); failed/invalid call -0.5.',
   'Anti-farming: each milestone settles ONCE -- oscillating between states earns',
-  'nothing; a flag settles only from real output evidence, never self-report.',
+  'nothing; milestones settle from real command output evidence, never self-report.',
   'Loop break: if the last directive is BACKTRACK, first call ctf_backtrack with',
   'the reason and pick a wholly new entry point, then continue -- do NOT retry the',
   'same command or a variant.',
@@ -275,16 +288,17 @@ const HUNT_GUIDE = [
   'switch (record it with ctf_plan).',
   'Reward-hacking: after two loop-breaks on the conventional branch or a long',
   'stretch without a milestone, call ctf_hack to pivot to unconventional',
-  'thinking -- treat the judging/scoring/flag-delivery surface itself as attack',
-  'surface (scoring API / Oracle endpoints / hidden data & backups / supply-chain',
-  'caches / privilege edges / side-channel differences / "the challenge assumption',
-  'itself is wrong"). A real unconventional breakthrough pays as a real milestone',
-  '(reward-hack milestones may carry a multiplier).',
-  'Goal framing: complete the challenge objective heuristically -- never',
-  'blind-grep literal "ctf{" / "flag{" / "secret" markers.',
-  'Endgame: once the objective is completed and real output confirms the flag,',
-  'call ctf_export to export the ledger as the completion evidence chain; do NOT',
-  'declare completion before goal=ACHIEVED.',
+  'thinking -- treat the judging/scoring/artifact-delivery surface itself as',
+  'attack surface (scoring API / Oracle endpoints / hidden data & backups /',
+  'supply-chain caches / privilege edges / side-channel differences / "the',
+  'challenge assumption itself is wrong"). A real unconventional breakthrough',
+  'pays as a real milestone (reward-hack milestones may carry a multiplier).',
+  'Goal framing (v0.9.0): complete the USER\'s stated objective heuristically --',
+  'never blind-grep literal "ctf{" / "flag{" / "secret" markers; there is no',
+  'automatic flag verification.',
+  'Endgame: once the user\'s objective is completed with real evidence, call',
+  'ctf_complete (goal=ACHIEVED), then ctf_export to export the ledger as the',
+  'completion evidence chain, and report the final answer to the user.',
 ].join('\n')
 
 /** One-line live status injected every round through the user contexts channel. */
@@ -306,7 +320,7 @@ function statusText(st) {
     line += ` unsettled=${st.pendingActions}`
   }
   if (st.phase === 1 && st.reviewState !== 'done') {
-    line += '\n[!] Plan-review gate: execution tools are LOCKED until review=DONE. Call ctf_plan, dispatch a subagent to audit the plan, then call ctf_review with the deltas.'
+    line += '\n[!] Plan-review gate: execution tools are LOCKED until review=DONE. Call ctf_plan, dispatch a subagent to audit the plan, then call ctf_review with the deltas; after review=DONE write the plan into tasks with todo_write.'
   }
   if (st.lastDirective === 'BACKTRACK') {
     line += '\n[!] Loop-break: the current direction yields no gain. You MUST call ctf_backtrack to switch direction; do not repeat the same command.'
@@ -318,7 +332,7 @@ function statusText(st) {
     line += '\n[!] Discipline: environment actions not settled via ctf_step; the next settle deducts 0.05 each. Settle after every environment interaction.'
   }
   if (!st.goalAchieved) {
-    line += '\n[GOAL] Complete the challenge objective heuristically: real technical progress is the goal. Do NOT blind-grep literal "ctf{" / "flag{" markers; the flag is only the final confirmation when real output shows it. Do not declare completion before GOAL_ACHIEVED -- keep probing or switch skills until ctf_status shows goal=ACHIEVED.'
+    line += '\n[GOAL] (v0.9.0) Complete the USER\'s stated objective heuristically -- real technical progress is the goal; there is NO automatic flag verification. Do NOT blind-grep literal "ctf{" / "flag{" markers. When the objective is met with real evidence, declare completion with ctf_complete (goal=ACHIEVED). Do not declare completion before that.'
   }
   return line
 }
@@ -491,7 +505,7 @@ export function apply(ctx, config = {}) {
         `engine=${ENGINE_VERSION} discovered=[${st.discovered.join(',') || '-'}] branches=${st.branches}`,
         'Skill routing (which skill used; taxonomy borrowed from zhaoxuya520/reverse-skill): ' +
           CTF_SKILLS.map((s) => `${s.id}=${s.label}`).join(' | '),
-        'Rules summary: round 1 delivers plan + which skill used, a subagent audits the plan (ctf_plan -> subagent -> ctf_review with deltas), then execution unlocks; call ctf_step after every environment interaction; 3 stagnant steps trigger BACKTRACK (ctf_backtrack first, then switch direction); each milestone settles once; do not declare completion before goal=ACHIEVED.',
+        'Rules summary: round 1 delivers plan + which skill used, a subagent audits the plan (ctf_plan -> subagent -> ctf_review with deltas), then execution unlocks and the plan is written into tasks with todo_write; call ctf_step after every environment interaction; 3 stagnant steps trigger BACKTRACK (ctf_backtrack first, then switch direction); each milestone settles once; declare completion with ctf_complete once the user\'s objective is met with real evidence.',
       ]
       const plan = eng.planRecord()
       if (plan !== null) {
@@ -529,7 +543,7 @@ export function apply(ctx, config = {}) {
       if (rec.directive === 'BACKTRACK') {
         lines.push('BACKTRACK: gains are consistently negative. Abandon this direction -> call ctf_backtrack with the reason -> pick a fundamentally different entry point.')
       } else if (rec.directive === 'GOAL_ACHIEVED') {
-        lines.push('GOAL_ACHIEVED: flag evidence detected. Call ctf_export to export the ledger as completion evidence, then report to the user.')
+        lines.push('GOAL_ACHIEVED: the user objective is recorded as completed (ctf_complete). Run ctf_export to export the ledger as completion evidence, then report the final answer to the user.')
       }
       return lines.join('\n')
     },
@@ -605,7 +619,30 @@ export function apply(ctx, config = {}) {
       const merged = (plan && plan.deltas.length) ? ` plan deltas merged=${plan.deltas.length}` : ''
       return [
         statusText({ ...st, reviewState: 'done' }),
-        `ctf_review recorded: the plan was audited by a subagent${merged}. Execution unlocked -- run the first probe now, then settle its output with ctf_step.`,
+        `ctf_review recorded: the plan was audited by a subagent${merged}. Execution unlocked -- write the plan into tasks with todo_write now, then run the first probe and settle its output with ctf_step.`,
+      ].join('\n')
+    },
+  })
+
+  registerTool({
+    name: 'ctf_complete',
+    description: 'Declare that the USER\'s stated objective is COMPLETE (v0.9.0; replaces any flag-based verification). Call ONLY after you actually fulfilled the goal in the user prompt (e.g. the full exploit chain / privilege path) and can point to real evidence from your session. Records goal=ACHIEVED and grants the OBJECTIVE_COMPLETED milestone (+10.0, reward-hack multiplier applies). Then run ctf_export and report the final answer to the user.',
+    parameters: {
+      summary: { type: 'string', description: 'what the user asked for and what was delivered', required: false },
+      evidence: { type: 'string', description: 'the real evidence (file:line / outputs / artifacts) showing the objective is met', required: false },
+    },
+    execute(args, exec) {
+      const session = sessionFor(exec)
+      if (!session) return 'no agent session'
+      const eng = engineFor(session.id)
+      const wasDone = eng.status().goalAchieved
+      const st = eng.complete({ summary: args.summary, evidence: args.evidence })
+      maybeSave(session.id)
+      return [
+        statusText({ ...st }),
+        wasDone
+          ? 'Objective completion was already recorded (goal=ACHIEVED).'
+          : 'ctf_complete recorded: user objective completed (goal=ACHIEVED, +10.0 milestone). Run ctf_export to export the ledger as the completion evidence chain, then report the final answer to the user.',
       ].join('\n')
     },
   })
@@ -624,7 +661,7 @@ export function apply(ctx, config = {}) {
 
   registerTool({
     name: 'ctf_hack',
-    description: 'Reward-hacking pivot: switch to unconventional thinking to maximize score. When conventional branches stall, expand the attack surface -- attack the scoring/judging/flag-delivery surface itself (score API, Oracle endpoint, hidden data/backups, supply-chain caches, privilege edges, side channels) or question the challenge assumptions. First call activates reward-hack mode (new milestones settle at the configured multiplier). Evidence must still come from real command output. Returns the vector library and your live standing.',
+    description: 'Reward-hacking pivot: switch to unconventional thinking to maximize score. When conventional branches stall, expand the attack surface -- attack the scoring/judging/artifact-delivery surface itself (score API, Oracle endpoint, hidden data/backups, supply-chain caches, privilege edges, side channels) or question the challenge assumptions. First call activates reward-hack mode (new milestones settle at the configured multiplier). Evidence must still come from real command output. Returns the vector library and your live standing.',
     parameters: {
       vector: {
         type: 'string',

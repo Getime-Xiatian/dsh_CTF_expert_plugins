@@ -1,13 +1,16 @@
-# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.8.2）
+# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.9.0）
 
 > [English](README.md) | **简体中文**
 
 面向 dsh 的奖励驱动自主 CTF Agent：**CVE 复现 · PoC 验证 · exploit 生成**。
 为 Agent 预设 `CTF Expert` 提供一套**奖励惩罚机制**（专注最大得分）+ **自主探路** +
-**loop 熔断** + **技能路由（which skill used）** + **终局保证**（goal=ACHIEVED 前不得宣告完成）。
+**loop 熔断** + **技能路由（which skill used）**。
 **Round-1 协议**：极简深思考轮先产出 plan + which skill used（纯文本），由
 **subagent 排查完善**后再解锁执行工具；完善后的 plan（v1 + audit deltas）**落账为结构化
 plan 记录**（v0.8.2）。
+**v0.9.0：去除 flag 验证环节**——目标完成 = **用户提示词目标完成**，由模型用新工具
+`ctf_complete` **显式声明**（goal=ACHIEVED / +10 里程碑）；plan audit 通过后先用
+`todo_write` 把计划写成任务再执行。
 插件所有 LLM 可见 prompt 均为英文，并在每个阶段强制 English thinking。
 
 > **v0.8.1 三修复（实测）**：① 极简产物步后经 `agent/turn-stopping` 自动唤醒进入 review
@@ -62,6 +65,7 @@ plan 记录**（v0.8.2）。
 | `ctf_step` | **必调**：结算一次环境交互（命令 + 输出/摘要）→ 得分 + 指令（state_inspector + reward_evaluator 合一）；未结算动作在此扣纪律分 |
 | `ctf_plan` | 记录分支/目标/假说/首探 + **which skill used**（技能取值见 `CTF_SKILLS`） |
 | `ctf_review` | **v0.8.0**：登记 subagent 排查完成（review=DONE）→ 解锁执行工具；review=PENDING 时 shell/file/探测工具不在目录（"完善后再执行"由工具面强制） |
+| `ctf_complete` | **v0.9.0**：显式声明**用户提示词目标完成**（goal=ACHIEVED，+10 里程碑，替代 flag 验证） |
 | `ctf_backtrack` | 熔断回溯：收到 `BACKTRACK` 后强制换方向，停滞/重复计数清零 |
 | `ctf_hack` | **奖励黑客（reward-hack）**：非常规思维转向，激活 hackMode 并外推攻击面（计分/Oracle/flag 交付、数据/供应链/权限边、侧信道、质疑题目假设）；hackMode 下新里程碑按乘数结算 |
 | `ctf_export` | 导出 append-only + FNV-1a 哈希链账本 JSON（溯源/审计/存档） |
@@ -82,7 +86,7 @@ plan 记录**（v0.8.2）。
   reverse-pwn / crypto-mobile / identity-windows / cloud-container / pcap-protocol /
   stego-forensic / patch-diff / code-audit / malware-config / zip-archive / llm-agent，
   借用 [zhaoxuya520/reverse-skill](https://github.com/zhaoxuya520/reverse-skill) 的路由模型）；
-  `status().goalAchieved`（FLAG_RETRIEVED 结算后置位）之前禁止宣告完成。
+  `goalAchieved` 由 `ctf_complete` 显式声明（v0.9.0，替代 flag 自动结算）。
 
 ## 账本持久化（可选）
 
@@ -97,26 +101,28 @@ plan 记录**（v0.8.2）。
 - `ctf-engine.mjs` — 纯逻辑零依赖引擎（分层奖励/惩罚、停滞 BACKTRACK、一次性里程碑、
   FNV-1a 哈希链账本、纪律看门狗、reward-hack、CTF_SKILLS 路由、goalAchieved、
   round-1 门控 productDelivered/reviewState）
-- `ctf-bootstrap.mjs` — 运行时插件（7 工具含 ctf_review + 三阶段门控 + review 工具面锁 +
+- `ctf-bootstrap.mjs` — 运行时插件（8 工具含 ctf_review/ctf_complete + 三阶段门控 + review 工具面锁 +
   session/event 推进 + tools/result 看门狗 + 可选持久化）
 - 设计文档 / 测试 / 变更溯源（`TRACE.md`）在工作区 `/home/xiatian/default/ctf-expert/`
 
-## 状态（v0.8.1）
+## 状态（v0.9.0）
 
-- [x] 引擎（分层奖励 / 步成本 / 重复指数惩罚 / 停滞 BACKTRACK / 一次性里程碑 / flag 证据结算 / 快照恢复）
+- [x] 引擎（分层奖励 / 步成本 / 重复指数惩罚 / 停滞 BACKTRACK / 一次性里程碑 / 快照恢复）
 - [x] 奖励黑客机制（`ctf_hack` + hackMode + 非常规攻击面向量库 + 乘数结算）
 - [x] 纪律看门狗（subagent*/委托工具豁免）+ 账本 FNV-1a 哈希链（篡改可检出）
-- [x] 技能路由 + 终局保证（v0.5.0）
+- [x] 技能路由（v0.5.0）
 - [x] **极简模式严格对齐内置 minimal + 全英文 prompt + 强制英语思考（v0.6.0）**
 - [x] **system 只注入内置 persona 一句，其余全部走用户提示词通道（v0.7.0）**
 - [x] **死循环修复 + Round-1 协议（v0.8.0）** + **v0.8.1 三修复（自动唤醒/exec 会话绑定/子代理跳过协议）**
+- [x] **结构化 plan 落账 + 去 flag-grep（v0.8.2）**
+- [x] **去除 flag 验证、目标完成 = 用户提示词目标 + ctf_complete 显式声明；audit 通过后 todo_write 写计划（v0.9.0）**
 - [x] 预设结构校验（31 rows，无重复 id）与真实挂载验证（standingKeyFor = MOUNT OK）
-- [ ] 最终验收：用户在 picker 开 CTF Expert 会话，确认 round-1 产物 → subagent 排查 → 执行 全链路
-- [x] 发布：代码已 push 到本仓库 `main`（v0.8.1 待推送）
+- [ ] 最终验收：用户在 picker 开 CTF Expert 会话，确认 round-1 产物 → subagent 排查 → todo 执行 → ctf_complete 全链路
+- [x] 发布：代码已 push 到本仓库 `main`（v0.9.0 待推送）
 
 ## 测试
 
 ```bash
-node test/engine.test.mjs      # 70 断言（奖励/惩罚/停滞/熔断/快照/哈希链/看门狗/reward-hack/技能/终局/i18n/round-1门控）
-node test/bootstrap.sim.mjs    # 43 断言（工具注册 + session/event 推进 + review 门控工具锁 + 三阶段门控 + 持久化 + 看门狗 + skill/goal + 英文断言）
+node test/engine.test.mjs      # 84 断言（奖励/惩罚/停滞/熔断/快照/哈希链/看门狗/reward-hack/技能/round-1门控/结构化plan/ctf_complete 目标声明）
+node test/bootstrap.sim.mjs    # 62 断言（工具注册 8 + session/event 推进 + review 门控工具锁 + todo 引导 + ctf_complete + 三阶段门控 + 持久化 + 看门狗 + 英文断言）
 ```

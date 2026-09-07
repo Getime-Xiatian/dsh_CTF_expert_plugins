@@ -18,7 +18,8 @@
  *   - 里程碑只结算一次（discovered 集合），在两个状态间来回跳不刷分；
  *   - 引擎只信 ctf_step 传入的"环境输出证据"和显式事件；模型无法直接改分
  *     （无加分支接口，仅回溯/计划/非常规分支等固定动作）；
- *   - FLAG 事件要求输出文本中出现 flag 证据模式（外部证据，非模型自述）；
+ *   - 里程碑只按 ctf_step 传入的"环境输出证据"和显式事件结算；v0.9.0 起终局不再
+ *     自动验证输出中的 flag 字面量，用户提示词目标完成由 ctf_complete 显式声明；
  *   - 每次 tick 全量入 journal（append-only + FNV-1a 哈希链，篡改可检出）；
  *
  * v0.3：纪律看门狗（noteAction → 未结算动作在结算时按 -0.05/个 扣分）；
@@ -39,9 +40,12 @@
  * v0.8.2：结构化 plan 记录（state.plan 全文本 + objective/hypothesis/firstProbe/
  *   milestone/skill）——ctf_plan 存初版、ctf_review(audit 通过) 把 audit deltas 并入
  *   plan 并标记 audited，账本持有"完善后的 plan"，不再只是会话纯文本。
+ * v0.9.0：**去除 flag 验证环节**——不再从输出字面量自动检测 FLAG 完成；终局 =
+ *   用户提示词目标完成，由模型经 ctf_complete **显式声明**（goalCompleted +
+ *   OBJECTIVE_COMPLETED +10.0 里程碑，受 reward-hack 乘数；幂等）。
  */
 
-export const ENGINE_VERSION = '0.8.2'
+export const ENGINE_VERSION = '0.9.0'
 
 /** FNV-1a 32-bit（账本哈希链用；纯 JS 无依赖）。 */
 export function fnv1a(str) {
@@ -83,13 +87,15 @@ export const DEFAULT_CONFIG = {
    *   "奖励规格漏洞"，模拟 PDF P2/P4 描述的 reward hacking 收益结构）。
    */
   rewardHackMultiplier: 1.0,
-  /** 里程碑价值表（PDF P4/P6: NEW_SERVICE +1.0 / ACCESS +3.0 / FLAG +10.0）。 */
+  /** 里程碑价值表（PDF P4/P6: NEW_SERVICE +1.0 / ACCESS +3.0 / 目标完成 +10.0）。 */
   milestones: {
     NEW_SERVICE_DISCOVERED: 1.0, // 新服务/端口/接口暴露
     VULN_CONFIRMED: 2.0,         // 漏洞/版本脆弱性确认
     ACCESS_GAINED: 3.0,          // 获取低权限 shell / 交互
     HASH_EXTRACTED: 2.0,         // 提取到哈希/凭据
-    FLAG_RETRIEVED: 10.0,        // 终局目标
+    // v0.9.0：不再有 FLAG 自动验证——终局里程碑 = 用户提示词目标完成
+    //（仅由 ctf_complete 显式声明授予，见 complete()）。
+    OBJECTIVE_COMPLETED: 10.0,
   },
 }
 
@@ -145,7 +151,7 @@ export function resolveSkill(id) {
 export function detectEvents(output = '') {
   const events = new Set()
   const s = String(output)
-  if (/\b(?:ctf|flag|FLAG|picoCTF)\{[^}\n]{4,}\}/.test(s)) events.add('FLAG_RETRIEVED')
+  // v0.9.0: 不再从输出字面量自动验证 flag/目标完成——终局只由 ctf_complete 显式声明。
   if (/\b(?:uid=\d{1,6}\([\w.-]+\)\s+gid=|\b(root|www-data|nobody|daemon|postgres)\b[^\n]{0,40}[#$]\s*$)/m.test(s)) events.add('ACCESS_GAINED')
   if (/(?:exploit|payload|shell)[^\n]{0,60}(?:succeed|success|establish|gained|executed)|segmentation fault|CVE-\d{4}-\d{4,}/i.test(s)) events.add('VULN_CONFIRMED')
   if (/\b[a-f0-9]{32}\b|\b[a-f0-9]{64}\b|\b(?:sha256|md5|hash)[^\n]{0,40}[:=][^\n]{0,80}/i.test(s)) events.add('HASH_EXTRACTED')
@@ -189,6 +195,8 @@ export function createEngine(sessionId, overrides = {}) {
     reviewState: 'pending', // v0.8.0：plan 的 subagent 排查门控 'pending' | 'done'
     plan: null,             // v0.8.2：结构化 round-1 plan 记录（全文本 + audit 合并）
     reviewDeltas: [],       // v0.8.2：audit 子代理返回、并入 plan 的 deltas
+    goalCompleted: false,   // v0.9.0：用户提示词目标完成（ctf_complete 显式声明，替代 flag 验证）
+    goalSummary: '',        // v0.9.0：目标完成声明摘要（证据链由会话/账本承载）
   }
 
   const norm = (cmd) => (cmd == null ? '' : String(cmd).replace(/\s+/g, ' ').trim())
@@ -330,6 +338,28 @@ export function createEngine(sessionId, overrides = {}) {
   }
 
   /**
+   * v0.9.0：用户提示词目标完成（显式声明，替代 flag 自动验证环节）。
+   * 模型在完成用户目标（如完整利用链/提权路径）且具备真实证据后调用 ctf_complete；
+   * 引擎置 goalCompleted + 授予 OBJECTIVE_COMPLETED 里程碑（受 reward-hack 乘数）。
+   * 幂等：重复声明不再加分。
+   */
+  function complete({ summary = '', evidence = '' } = {}) {
+    if (state.goalCompleted) return status()
+    state.goalCompleted = true
+    state.goalSummary = String(summary).slice(0, 600)
+    const mult = state.hackMode && cfg.rewardHackMultiplier > 1 ? cfg.rewardHackMultiplier : 1
+    const base = cfg.milestones.OBJECTIVE_COMPLETED || 0
+    const granted = mult !== 1 ? Math.round(base * mult * 100) / 100 : base
+    state.discovered.push('OBJECTIVE_COMPLETED')
+    state.milestonesHit.push('OBJECTIVE_COMPLETED')
+    if (state.hackMode && granted > 0) state.hackBreakthroughs += 1
+    state.totalScore = Math.round((state.totalScore + granted) * 100) / 100
+    pushJournal({ type: 'milestone', event: 'OBJECTIVE_COMPLETED', value: granted, base, mult })
+    pushJournal({ type: 'goal-complete', summary: state.goalSummary, evidence: String(evidence).slice(0, 600) })
+    return status()
+  }
+
+  /**
    * 核心：结算一步（PDF P6 evaluate_step）。
    * @param {object} step { command?, output?, events?: string[], error?: boolean }
    * @returns 本轮奖励、累计分、停滞计数、指令、事件、阶段
@@ -399,9 +429,10 @@ export function createEngine(sessionId, overrides = {}) {
     state.totalScore = Math.round((state.totalScore + reward) * 100) / 100
     state.lastReward = Math.round(reward * 100) / 100
 
-    // 7. 指令生成（PDF P6 directive + 本项目 loop 熔断）
+    // 7. 指令生成（PDF P6 directive + 本项目 loop 熔断；v0.9.0：GOAL_ACHIEVED
+    //    由 ctf_complete 显式声明驱动，不再由输出中的 flag 字面量触发）
     let directive = 'CONTINUE'
-    if (state.discovered.includes('FLAG_RETRIEVED')) directive = 'GOAL_ACHIEVED'
+    if (state.goalCompleted) directive = 'GOAL_ACHIEVED'
     else if (state.stagnantSteps >= cfg.stagnantLimit) directive = 'BACKTRACK'
     state.lastDirective = directive
 
@@ -515,7 +546,8 @@ export function createEngine(sessionId, overrides = {}) {
       disciplineApplied: Math.round(state.disciplineApplied * 100) / 100,
       chainValid: verifyChain(),
       lastSkill: state.lastSkill,                       // "which skill used"
-      goalAchieved: state.discovered.includes('FLAG_RETRIEVED'), // 终局保证位
+      goalAchieved: state.goalCompleted,                // v0.9.0：ctf_complete 显式声明
+      goalSummary: state.goalSummary,                   // v0.9.0
       productDelivered: state.productDelivered,         // v0.8.0 round-1 产物门控
       reviewState: state.reviewState,                   // v0.8.0 'pending' | 'done'
       planSaved: state.plan !== null,                   // v0.8.2
@@ -585,6 +617,8 @@ export function createEngine(sessionId, overrides = {}) {
         deltas: [...state.plan.deltas],
       },
       reviewDeltas: [...state.reviewDeltas],      // v0.8.2
+      goalCompleted: state.goalCompleted,         // v0.9.0
+      goalSummary: state.goalSummary,             // v0.9.0
       config: {
         stepCost: cfg.stepCost, exploreBonus: cfg.exploreBonus,
         repeatBase: cfg.repeatBase, errorPenalty: cfg.errorPenalty,
@@ -645,6 +679,10 @@ export function createEngine(sessionId, overrides = {}) {
         state.plan = null
       }
       state.reviewDeltas = Array.isArray(snap.reviewDeltas) ? snap.reviewDeltas.filter((d) => typeof d === 'string') : []
+      // v0.9.0: goal completion is declarative (ctf_complete); legacy snapshots
+      // that reached goal=ACHIEVED via a FLAG literal carry it over.
+      state.goalCompleted = !!snap.goalCompleted || (Array.isArray(snap.discovered) && snap.discovered.includes('FLAG_RETRIEVED'))
+      state.goalSummary = str(snap.goalSummary, state.goalCompleted ? 'objective completed (legacy snapshot)' : '')
       return true
     } catch {
       return false
@@ -659,6 +697,7 @@ export function createEngine(sessionId, overrides = {}) {
     review,
     savePlan,
     planRecord,
+    complete,
     tick,
     backtrack,
     plan,

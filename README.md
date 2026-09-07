@@ -1,4 +1,4 @@
-# CTF Expert - dsh CTF 能力插件 / Agent 预设 (v0.8.2)
+# CTF Expert - dsh CTF 能力插件 / Agent 预设 (v0.9.0)
 
 > **English** | [简体中文](README.zh-CN.md)
 
@@ -38,7 +38,7 @@ picker.
 | `agent.cordis.yml` | Preset composition (31 rows, no duplicate ids) |
 | `preset.yml` | Display metadata (name/description) |
 | `ctf-engine.mjs` | Pure-logic zero-dep engine: layered rewards/penalties, stagnation BACKTRACK, one-shot milestones, FNV-1a hash-chain ledger, discipline watchdog, reward-hack, CTF_SKILLS routing, goalAchieved final state, round-1 gate (productDelivered / reviewState) |
-| `ctf-bootstrap.mjs` | Runtime plugin: 7 ctf_* tools (incl. ctf_review) + phase gating + review-gate tool lock + durable session/event promotion + tools/result watchdog + optional ledger persistence + v0.7 prompt-injection contract |
+| `ctf-bootstrap.mjs` | Runtime plugin: 8 ctf_* tools (ctf_review + ctf_complete among them) + phase gating + review-gate tool lock + durable session/event promotion + tools/result watchdog + optional ledger persistence + v0.7 prompt-injection contract |
 
 ## Round-1 protocol + phase design (v0.8.0)
 
@@ -84,6 +84,14 @@ prompts/status no longer steer toward literal `ctf{`/`flag{` string hunting
 (blind greps for such markers are explicitly forbidden; the flag only counts
 as final confirmation when real command output shows it; detection regex
 untouched).
+
+v0.9.0: the flag-verification stage is REMOVED. Completion = the USER-prompt
+objective completed; the model declares it explicitly with the new
+`ctf_complete` tool (goal=ACHIEVED, OBJECTIVE_COMPLETED +10.0 milestone,
+reward-hack multiplier applies, idempotent). No output literal is auto-checked
+for completion anymore. After the plan audit passes (ctf_review, review=DONE)
+the model writes the audited plan into tasks with `todo_write` before
+executing (see REVIEW_WAKE/REVIEW_GUIDE).
 
 Why v0.8.0 exists: a measured CTF session dead-looped in phase 0 (the agent
 probed forever, never emitting the plan) because phase promotion read
