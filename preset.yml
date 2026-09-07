@@ -1,0 +1,2 @@
+name: CTF Expert
+description: "Reward-driven autonomous CTF agent (CVE repro / PoC / exploit). 极简一轮思考 → 标准全工具 → 奖惩/熔断攻坚: layered milestone+curiosity rewards, step/repeat penalties, stagnation BACKTRACK loop-break, append-only score ledger (ctf_* tools)."
