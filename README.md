@@ -1,5 +1,7 @@
 # CTF Expert - dsh CTF 能力插件 / Agent 预设 (v0.6.0)
 
+> **English** | [简体中文](README.zh-CN.md)
+
 Reward-driven autonomous CTF agent for dsh: CVE repro / PoC validation / exploit
 generation. Provides the Agent preset `CTF Expert` with a reward/penalty
 mechanism (maximize score), autonomous path-finding, loop-break, skill routing
