@@ -1,4 +1,4 @@
-# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.6.0）
+# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.7.0）
 
 > [English](README.md) | **简体中文**
 
@@ -12,6 +12,14 @@
 1. 把本目录放入 `~/.dsh/.agent-presets/ctf-expert/`（或你的 preset root）；
 2. 在 dsh Web 的 Agent Preset 选择器里选 **CTF Expert** 开一个新会话；
 3. 下发 CTF 任务（如「复现 CVE-2026-43499 并给出 PoC」）。
+
+## 提示词注入契约（v0.7.0）
+
+系统提示词**只**注入内置极简模式的那一句 persona（逐字）：
+
+> You are a helpful software engineer assistant.
+
+其余一切 CTF 指引（阶段规则、产物 plan + which skill used、English thinking、实时账本状态）一律作为**用户提示词**注入——经 assembly 的 `contexts` 通道渲染为 user-role 快照（自动取代旧快照），绝不进 system。
 
 ## 三阶段设计
 
@@ -65,16 +73,17 @@
 - `ctf-bootstrap.mjs` — 运行时插件（6 工具 + 三阶段门控 + tools/result 看门狗 + 可选持久化）
 - 设计文档 / 测试 / 变更溯源（`TRACE.md`）在工作区 `/home/xiatian/default/ctf-expert/`
 
-## 状态（v0.6.0）
+## 状态（v0.7.0）
 
 - [x] 引擎（分层奖励 / 步成本 / 重复指数惩罚 / 停滞 BACKTRACK / 一次性里程碑 / flag 证据结算 / 快照恢复）
 - [x] 奖励黑客机制（`ctf_hack` + hackMode + 非常规攻击面向量库 + 乘数结算）
 - [x] 纪律看门狗 + 账本 FNV-1a 哈希链（篡改可检出）
 - [x] 技能路由 + 终局保证（v0.5.0）
 - [x] **极简模式严格对齐内置 minimal + 全英文 prompt + 强制英语思考（v0.6.0）**
+- [x] **system 只注入内置 persona 一句，其余全部走用户提示词通道（v0.7.0）**
 - [x] 预设结构校验（31 rows，无重复 id）与真实挂载验证（standingKeyFor = MOUNT OK）
 - [ ] 最终验收：用户在 picker 开 CTF Expert 会话，确认工具列表与三阶段行为
-- [x] 发布：代码已 push 到本仓库 `main`（v0.6.0）
+- [x] 发布：代码已 push 到本仓库 `main`（v0.7.0）
 
 ## 测试
 
