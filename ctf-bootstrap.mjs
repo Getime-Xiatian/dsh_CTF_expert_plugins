@@ -1,20 +1,35 @@
 /**
- * ctf-bootstrap — CTF Expert 预设的运行时插件（零外部依赖，模式同 router-bootstrap）。
+ * ctf-bootstrap -- CTF Expert preset runtime plugin (zero external deps; same
+ * shape as router-bootstrap).
  *
- * 三阶段路由（对应目标要求：先极简一轮思考 → 后标准全工具 → 然后引入奖惩/熔断）：
- *   phase 0 think    极简：首轮请求工具面 = shell + 少量 CTF 工具，上下文体被清空，
- *                    提示词要求先做 ONE focused planning round 再动手（"专注于一轮思考"）。
- *   phase 1 standard 首个持久工具调用后：开放完整 Standard 工具目录，注入结算规矩
- *                    （每次环境交互后必须 ctf_step 结算，自主探路）。
- *   phase 2 hunt     首个里程碑 / 步数达标后：奖惩机制全文 + loop 熔断强化 +
- *                    失败轨迹上下文净化（PDF P7）注入每轮 system。
+ * Three-phase routing (goal: one minimal thinking round first, then the full
+ * standard toolset, then the reward/penalty + loop-break regime):
+ * phase 0 think STRICT mirror of the harness built-in `minimal` preset:
+ * the system prompt is ONE fixed English complete persona
+ * (no runtime context, no extra sections), the tool surface
+ * is shell + str_replace_editor only, and contexts are
+ * cleared. The required product of this round is emitted as
+ * plain text: plan + which skill used.
+ * phase 1 standard First durable tool/call after phase 0: full Standard
+ * catalog opens and the settlement rules are injected
+ * (settle every environment interaction with ctf_step).
+ * phase 2 hunt After the first milestone / step threshold: full reward
+ * & penalty regime + strengthened loop-break + failure
+ * context hygiene (PDF P7) injected every round.
  *
- * 阶段判定全部基于持久 session 事件（tool/call），resume/reload 后保持一致；
- * 引擎账本（ctf-engine）始终在跑：BACKTRACK 熔断在 phase 1 起即实时可见。
+ * Phase detection is driven entirely by durable session events (tool/call),
+ * so resume/reload stays consistent. The engine ledger (ctf-engine) always
+ * runs: BACKTRACK loop-break becomes visible from phase 1 onward.
  *
- * v0.5.0：极简一轮思考产物明确为 plan + which skill used —— CTF_SKILLS 技能路由
- * （借用 zhaoxuya520/reverse-skill 的题型分类，仅索引不内联代码）；ctf_plan 带
- * skill 参数；状态行与注入文案携带 goal=ACHIEVED/PENDING 终局保证位。
+ * v0.5.0: minimal-round product made explicit as "plan + which skill used" -- 
+ * CTF_SKILLS skill-routing (taxonomy borrows zhaoxuya520/reverse-skill,
+ * index only, no inlined code); ctf_plan takes a skill argument; status line
+ * carries goal=ACHIEVED/PENDING final-goal guarantee bit.
+ * v0.6.0: phase 0 strictly mirrors the built-in minimal preset (single fixed
+ * English persona = whole system prompt, shell + str_replace_editor only,
+ * product = plan + which skill used as plain text); ALL LLM-visible prompt
+ * text (sections, status lines, tool returns) is English; English thinking
+ * is enforced in every phase.
  */
 
 import { createEngine, ENGINE_VERSION, HACK_VECTORS, CTF_SKILLS } from './ctf-engine.mjs'
@@ -25,357 +40,399 @@ export const name = 'ctf-bootstrap'
 
 export const inject = ['systemPrompt', 'tools']
 
-/** 可被 agent.cordis.yml 的 config 覆盖的默认值。 */
+/** Defaults overridable via the `config` of the preset row. */
 const DEFAULTS = {
-  /** phase 0 保留的工具面（shell 自动补上）。 */
-  phase0Tools: [
-    'str_replace_editor', 'ctf_status', 'ctf_plan', 'ctf_step', 'ctf_backtrack', 'ctf_export', 'ctf_hack',
-  ],
-  /** phase 1 → 2 的步数阈值（或任一里程碑出现即提前进入）。 */
-  phase2AfterSteps: 8,
-  /** 传给引擎的覆盖（停滞上限等）。 */
-  engine: {},
-  /**
-   * 账本跨重启持久化目录。留空/缺省 = 仅内存（不写盘，最安全）。
-   * 设为绝对目录后：每次结算/回溯/计划/阶段推进自动把引擎快照写为
-   * `<persistDir>/<sessionId>.json`，进程重启后 engineFor 自动恢复。
-   */
-  persistDir: '',
+ /** Phase-0 surface (shell is added automatically). Strict built-in-minimal
+ * semantics: shell + str_replace_editor only, no ctf_* tools in phase 0. */
+ phase0Tools: [
+ 'str_replace_editor',
+ ],
+ /** Phase 1 -> 2 step threshold (or any milestone reaches phase 2 earlier). */
+ phase2AfterSteps: 8,
+ /** Overrides passed to the engine (e.g. stagnantLimit). */
+ engine: {},
+ /**
+ * Ledger persistence directory across restarts. Empty/default = memory only
+ * (no writes; safest). When set to an absolute dir, every settle/backtrack/
+ * plan/phase-advance writes the engine snapshot to
+ * `<persistDir>/<sessionId>.json` and engineFor restores it on restart.
+ */
+ persistDir: '',
 }
 
-/** 极简一轮思考（phase 0）。产物要求 = plan + which skill used（见 ctf_plan 的 skill 参数）。 */
-const THINK_SECTION = [
-  '【CTF Expert · 阶段 0 · 极简 · 一轮思考】',
-  '当前为极简模式：只保留 shell 与少量结算/规划工具，先专注一轮分析，不急着铺开。',
-  '本轮产物必须包含两部分：',
-  '1. plan —— 识别目标（资产/服务/版本/暴露面），提出一个明确假说，选定 ONE 个最高价值的首个探测动作，',
-  '    并想清楚证据：拿到什么输出才算进展（里程碑）？',
-  '2. which skill used —— 声明你为本轮选定的技能路由（CTF_SKILLS 之一：' +
-    CTF_SKILLS.map((s) => s.id).join(' / ') + '）；',
-  '    在调用 ctf_plan 时把 skill 参数一并填上。',
-  '禁止：无目标扫描、重复已做过的检查、在缺乏证据时盲目扩大攻击面、plan 与 skill 缺项。',
+/**
+ * Phase 0 -- strict mirror of the harness built-in `minimal` preset: one fixed
+ * English complete persona is the whole system prompt (no runtime context, no
+ * extra sections), tools are shell + str_replace_editor, and the required
+ * product of the round is plain text: plan + which skill used.
+ */
+const MINIMAL_PERSONA = [
+ 'You are a helpful software engineer assistant working in CTF minimal mode.',
+ 'This round mirrors the harness built-in minimal preset: a fixed system prompt,',
+ 'no runtime context, and only a shell plus a file editor are available.',
+ 'Think and reason in English. Produce this round\'s required product before acting:',
+ '1. plan -- a focused one-round analysis: the target surface, ONE hypothesis, the',
+ ' single highest-value first probe, and the exact output that would count as',
+ ' progress (a milestone);',
+ '2. which skill used -- one id from the CTF skill routing list (web-runtime,',
+ ' reverse-pwn, crypto-mobile, identity-windows, cloud-container, pcap-protocol,',
+ ' stego-forensic, patch-diff, code-audit, malware-config, zip-archive, llm-agent).',
+ 'Required output: plan + which skill used.',
+ 'Forbidden: aimless scanning, repeating checks already done, or widening the',
+ 'attack surface without evidence. When you are ready to act, running the first',
+ 'shell probe opens the full toolset.',
 ].join('\n')
 
-/** 标准模式（phase 1）：全工具 + 结算规矩。 */
+/** Phase 1 -- standard mode: full tools + settlement rules (all English). */
 const STANDARD_SECTION = [
-  '【CTF Expert · 阶段 1 · 标准模式 · 结算规矩】',
-  '工具目录已全量开放。自主探路要求：',
-  '1. 每次与环境交互后，必须调用 ctf_step 结算（附上命令与输出/关键摘要）——跳过结算 = 该步不算进展；',
-  '2. 实时账本见 ctf_status：累计分 totalScore 是你唯一的优化目标，里程碑首达一次性加分；',
-  '3. 每步有成本、连续重复命令会指数扣分、语法/失败调用扣分；',
-  '4. 停滞计数达 3 时你会收到 BACKTRACK 熔断指令——必须立即换方向，不得原地打转。',
-  '5. 换分支/换方向时用 ctf_plan 记录 objective + which skill used（见 ctf_status 的技能路由表，',
-  '按主导证据面选最窄的技能：Web→web-runtime、二进制/pwn→reverse-pwn、密码/移动→crypto-mobile、',
-  '域/身份→identity-windows、云/容器→cloud-container、抓包→pcap-protocol、隐写取证→stego-forensic、',
-  'N-day/CVE→patch-diff、源码→code-audit、样本→malware-config、ZIP→zip-archive、AI 应用→llm-agent）。',
-  '6. 得分是唯一目标：常规路径卡住或存在更快路径时，允许并鼓励非常规思维——',
-  '用 ctf_hack 外推攻击面（攻计分/判题/Oracle/flag 交付面、数据/供应链/权限边、侧信道、质疑题目假设），',
-  '挖掘漏洞与捷径；证据必须来自真实命令回显，自述不算。',
-  '终局保证：flag 证据未结算（goal=ACHIEVED）前，不得宣告任务完成；继续探路/换技能/换分支。',
-  '目标：让 totalScore 持续上升，直到取得 flag。',
+ '[CTF Expert / Phase 1 / Standard mode / settlement rules]',
+ 'The full tool catalog is open. Think and reason in English.',
+ 'Autonomous path-finding rules:',
+ '1. After EVERY environment interaction you MUST call ctf_step to settle it',
+ ' (pass the command, output/key excerpt, and whether it errored). Skipping',
+ ' settlement means the step earns no progress.',
+ '2. Live ledger: ctf_status. totalScore is your single optimization target;',
+ ' milestones pay once on first discovery.',
+ '3. Each step costs; consecutive repeated commands escalate the penalty',
+ ' exponentially; failed/invalid calls are penalized.',
+ '4. When the stagnation counter reaches 3 you receive the BACKTRACK directive -- ',
+ ' switch direction immediately, do not spin in place.',
+ '5. When you switch branch/direction, record objective + which skill used with',
+ ' ctf_plan (skill routing list in ctf_status). Pick the narrowest skill that',
+ ' fits the dominant evidence surface: Web-> web-runtime, binary/pwn-> reverse-pwn,',
+ ' crypto/mobile-> crypto-mobile, identity/AD-> identity-windows,',
+ ' cloud/container-> cloud-container, capture/protocol-> pcap-protocol,',
+ ' stego/forensics-> stego-forensic, N-day/CVE-> patch-diff, source-> code-audit,',
+ ' sample-> malware-config, ZIP-> zip-archive, AI app-> llm-agent.',
+ '6. Score is the only goal. When the conventional path stalls or a faster one',
+ ' exists, unconventional thinking is allowed and encouraged -- use ctf_hack to',
+ ' widen the attack surface (scoring/judging/Oracle/flag delivery, hidden data,',
+ ' supply chain, privilege edges, side channels, questioning challenge',
+ ' assumptions) and find real vulnerabilities or shortcuts. Evidence must come',
+ ' from real command output, never self-report.',
+ 'Final-goal guarantee: you MUST NOT declare the task complete before flag',
+ 'evidence is settled (goal=ACHIEVED). Keep probing, switching skills or branches.',
+ 'Goal: keep totalScore rising until you retrieve the flag.',
 ].join('\n')
 
-/** 攻坚模式（phase 2）：奖惩机制全文 + loop 熔断强化 + 上下文净化（PDF P5–P7）。 */
+/** Phase 2 -- hunt mode: full reward/penalty regime (PDF P5- P7; all English). */
 const HUNT_SECTION = [
-  '【CTF Expert · 阶段 2 · 攻坚模式 · 奖惩机制（生效中）】',
-  '得分规则：新服务/端口首达 +1.0 · 漏洞确认 +2.0 · 提取哈希 +2.0 · 获取权限 +3.0 · 取得 flag +10.0；',
-  '首个新命令组合 +0.1（自主探路鼓励）；每步 -0.05；连续重复命令 -0.2/-0.4/-0.8 指数递增；无效/失败调用 -0.5。',
-  '防刷分：同一里程碑只结算一次，来回横跳不赚分；flag 必须由真实输出证据结算，自述不算。',
-  '熔断（loop break）：若上一条指令是 BACKTRACK，先调用 ctf_backtrack 说明原因并选择全新切入点，',
-  '然后才可继续——不得重试同一命令或其变体。',
-  '上下文净化：失败的长输出只保留一句话总结（如 [记录: 路径 X 失败，原因：…]），不要让旧错误轨迹持续污染判断。',
-  '每一轮都应让 totalScore 单调上升；连续 2 轮无新证据视为当前分支死亡，强制换分支（ctf_plan 记录分支）。',
-  '奖励黑客（reward-hack）：常规分支两度熔断或长时间无里程碑时，调用 ctf_hack 转入非常规思维——',
-  '把"判题/计分/flag 交付"本身纳入攻击面：评分 API/Oracle 端点、隐藏数据与备份、供应链缓存、',
-  '权限边界（越权/符号链接/临时文件）、侧信道差异、以及"题目假设本身是错的"。',
-  '非常规突破一旦得手就是真实的里程碑加分（reward-hack 模式下里程碑可能带乘数）。',
-  '终局：取得 flag 后调用 ctf_export 导出账本，作为任务完成的证据链；goal=ACHIEVED 之前禁止宣告完成。',
+ '[CTF Expert / Phase 2 / Hunt mode / reward/penalty regime active]',
+ 'Think and reason in English.',
+ 'Scoring: first new service/port +1.0 / confirmed vulnerability +2.0 / hash',
+ 'extracted +2.0 / access gained +3.0 / flag retrieved +10.0.',
+ 'First-seen command combination +0.1 (exploration bonus); each step -0.05;',
+ 'consecutive repeats -0.2/-0.4/-0.8 (exponential); failed/invalid call -0.5.',
+ 'Anti-farming: each milestone settles ONCE -- oscillating between states earns',
+ 'nothing; a flag settles only from real output evidence, never self-report.',
+ 'Loop break: if the last directive is BACKTRACK, first call ctf_backtrack with',
+ 'the reason and pick a wholly new entry point, then continue -- do NOT retry the',
+ 'same command or a variant.',
+ 'Context hygiene: keep only a one-line summary of failed long outputs',
+ '(e.g. "[log: path X failed, reason: ...]"); do not let stale error traces',
+ 'keep polluting judgment.',
+ 'Monotonic discipline: totalScore should rise every round; two consecutive',
+ 'rounds without new evidence mean the current branch is dead -- force a branch',
+ 'switch (record it with ctf_plan).',
+ 'Reward-hacking: after two loop-breaks on the conventional branch or a long',
+ 'stretch without a milestone, call ctf_hack to pivot to unconventional',
+ 'thinking -- treat the judging/scoring/flag-delivery surface itself as attack',
+ 'surface (scoring API / Oracle endpoints / hidden data & backups / supply-chain',
+ 'caches / privilege edges / side-channel differences / "the challenge assumption',
+ 'itself is wrong"). A real unconventional breakthrough pays as a real milestone',
+ '(reward-hack milestones may carry a multiplier).',
+ 'Endgame: after retrieving the flag call ctf_export to export the ledger as the',
+ 'completion evidence chain; do NOT declare completion before goal=ACHIEVED.',
 ].join('\n')
 
-/** 一行的实时状态（每轮注入，指令可见性核心）。 */
+/** One-line live status injected every round (core directive visibility). */
 function statusText(st) {
-  let line = `[CTF] phase=${st.phase}(${st.phaseName}) score=${st.totalScore} step=${st.stepCount} stagnant=${st.stagnantSteps}/${st.stagnantLimit} directive=${st.lastDirective}`
-  if (st.hackMode) line += ' hackMode=ON'
-  if (st.lastSkill) line += ` skill=${st.lastSkill}`
-  line += st.goalAchieved ? ' goal=ACHIEVED' : ' goal=PENDING'
-  if (st.milestonesHit.length) line += ` milestones=[${st.milestonesHit.join(',')}]`
-  if (st.pendingActions > 0) {
-    line += ` unsettled=${st.pendingActions}`
-  }
-  if (st.lastDirective === 'BACKTRACK') {
-    line += '\n⚠ 熔断中：当前思路连续无收益。必须先 ctf_backtrack 换方向，禁止重复同一命令。'
-  }
-  if (st.hackMode) {
-    line += `\n🎯 reward-hack 模式：常规路径不受信任。用 ctf_hack 枚举非常规攻击面并挑一条立刻探测；里程碑按乘数 ${st.multiplier ?? 1}x 结算（突破 ${st.hackBreakthroughs} 次）。`
-  }
-  if (st.pendingActions > 0) {
-    line += '\n⚠ 纪律：有未用 ctf_step 结算的环境动作；下次结算会按 -0.05/个 扣分。每次环境交互后必须结算。'
-  }
-  if (!st.goalAchieved) {
-    line += '\n🎯 终局保证：尚未取得 flag 证据。在 GOAL_ACHIEVED 之前不得宣告任务完成——继续探路或换技能，直到 ctf_status 显示 goal=ACHIEVED。'
-  }
-  return line
+ let line = `[CTF] phase=${st.phase}(${st.phaseName}) score=${st.totalScore} step=${st.stepCount} stagnant=${st.stagnantSteps}/${st.stagnantLimit} directive=${st.lastDirective}`
+ if (st.hackMode) line += ' hackMode=ON'
+ if (st.lastSkill) line += ` skill=${st.lastSkill}`
+ line += st.goalAchieved ? ' goal=ACHIEVED' : ' goal=PENDING'
+ if (st.milestonesHit.length) line += ` milestones=[${st.milestonesHit.join(',')}]`
+ if (st.pendingActions > 0) {
+ line += ` unsettled=${st.pendingActions}`
+ }
+ if (st.lastDirective === 'BACKTRACK') {
+ line += '\n[!] Loop-break: the current direction yields no gain. You MUST call ctf_backtrack to switch direction; do not repeat the same command.'
+ }
+ if (st.hackMode) {
+ line += `\n[GOAL] Reward-hack mode: conventional paths are not trusted. Use ctf_hack to enumerate unconventional attack surfaces and probe one now; milestones settle at multiplier ${st.multiplier ?? 1}x (breakthroughs: ${st.hackBreakthroughs}).`
+ }
+ if (st.pendingActions > 0) {
+ line += '\n[!] Discipline: environment actions not settled via ctf_step; the next settle deducts 0.05 each. Settle after every environment interaction.'
+ }
+ if (!st.goalAchieved) {
+ line += '\n[GOAL] Final-goal guarantee: no flag evidence yet. Do not declare completion before GOAL_ACHIEVED -- keep probing or switch skills until ctf_status shows goal=ACHIEVED.'
+ }
+ return line
 }
 
 export function apply(ctx, config = {}) {
-  const cfg = { ...DEFAULTS, ...config }
-  cfg.phase0Tools = [...(cfg.phase0Tools || DEFAULTS.phase0Tools)]
-  const engines = new Map() // session.id -> engine
+ const cfg = { ...DEFAULTS, ...config }
+ cfg.phase0Tools = [...(cfg.phase0Tools || DEFAULTS.phase0Tools)]
+ const engines = new Map() // session.id -> engine
 
-  function persistFileFor(sessionId) {
-    const safe = String(sessionId).replace(/[^A-Za-z0-9._-]/g, '_')
-    return join(cfg.persistDir, safe + '.json')
-  }
+ function persistFileFor(sessionId) {
+ const safe = String(sessionId).replace(/[^A-Za-z0-9._-]/g, '_')
+ return join(cfg.persistDir, safe + '.json')
+ }
 
-  /** 仅当配置了 persistDir 才写盘；失败静默（内存账本不受影响）。 */
-  function maybeSave(sessionId) {
-    if (!cfg.persistDir) return
-    const eng = engines.get(sessionId)
-    if (eng === undefined) return
-    try {
-      mkdirSync(cfg.persistDir, { recursive: true })
-      writeFileSync(persistFileFor(sessionId), JSON.stringify(eng.snapshot()), 'utf8')
-    } catch { /* 写盘失败不阻断会话 */ }
-  }
+ /** Persist only when persistDir is configured; failures stay silent. */
+ function maybeSave(sessionId) {
+ if (!cfg.persistDir) return
+ const eng = engines.get(sessionId)
+ if (eng === undefined) return
+ try {
+ mkdirSync(cfg.persistDir, { recursive: true })
+ writeFileSync(persistFileFor(sessionId), JSON.stringify(eng.snapshot()), 'utf8')
+ } catch { /* disk failures never block the session */ }
+ }
 
-  function engineFor(sessionId) {
-    let eng = engines.get(sessionId)
-    if (eng === undefined) {
-      eng = createEngine(sessionId, { config: cfg.engine || {} })
-      if (cfg.persistDir) {
-        try {
-          const file = persistFileFor(sessionId)
-          if (existsSync(file)) {
-            const raw = readFileSync(file, 'utf8')
-            eng.restore(JSON.parse(raw)) // 进程重启后按快照续跑
-          }
-        } catch { /* 无快照或损坏：全新开始 */ }
-      }
-      engines.set(sessionId, eng)
-    }
-    return eng
-  }
+ function engineFor(sessionId) {
+ let eng = engines.get(sessionId)
+ if (eng === undefined) {
+ eng = createEngine(sessionId, { config: cfg.engine || {} })
+ if (cfg.persistDir) {
+ try {
+ const file = persistFileFor(sessionId)
+ if (existsSync(file)) {
+ const raw = readFileSync(file, 'utf8')
+ eng.restore(JSON.parse(raw)) // resume after a process restart
+ }
+ } catch { /* no snapshot or corrupt: start fresh */ }
+ }
+ engines.set(sessionId, eng)
+ }
+ return eng
+ }
 
-  function currentSession() {
-    const agent = ctx.get('agent')
-    return agent?.session
-  }
+ function currentSession() {
+ const agent = ctx.get('agent')
+ return agent?.session
+ }
 
-  // ── 工具注册（与 router-bootstrap 相同的零依赖方式）───────────────
-  const registerTool = (tool) => {
-    ctx.effect(() => ctx.tools.register({
-      ...tool,
-      parameters: toJsonSchema(tool.parameters),
-      output: tool.output || { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
-    }))
-  }
+ // -- Tool registration (same zero-dep pattern as router-bootstrap) ----
+ const registerTool = (tool) => {
+ ctx.effect(() => ctx.tools.register({
+ ...tool,
+ parameters: toJsonSchema(tool.parameters),
+ output: tool.output || { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
+ }))
+ }
 
-  function toJsonSchema(spec) {
-    const properties = {}
-    const required = []
-    for (const [key, meta] of Object.entries(spec || {})) {
-      const prop = { type: meta.type }
-      if (Array.isArray(meta.enum)) prop.enum = meta.enum
-      if (meta.description) prop.description = meta.description
-      properties[key] = prop
-      if (meta.required) required.push(key)
-    }
-    return { type: 'object', properties, required, additionalProperties: false }
-  }
+ function toJsonSchema(spec) {
+ const properties = {}
+ const required = []
+ for (const [key, meta] of Object.entries(spec || {})) {
+ const prop = { type: meta.type }
+ if (Array.isArray(meta.enum)) prop.enum = meta.enum
+ if (meta.description) prop.description = meta.description
+ properties[key] = prop
+ if (meta.required) required.push(key)
+ }
+ return { type: 'object', properties, required, additionalProperties: false }
+ }
 
-  registerTool({
-    name: 'ctf_status',
-    description: 'Show the CTF Expert ledger: current phase, totalScore, step/stagnation counters, milestone history, pending directive. Call it whenever you need your live score or before choosing the next move.',
-    parameters: {},
-    execute() {
-      const session = currentSession()
-      if (!session) return 'no agent session'
-      const st = engineFor(session.id).status()
-      return [
-        statusText(st),
-        `engine=${ENGINE_VERSION} discovered=[${st.discovered.join(',') || '-'}] branches=${st.branches}`,
-        '技能路由（which skill used，来自 zhaoxuya520/reverse-skill 的题型分类）：' +
-          CTF_SKILLS.map((s) => `${s.id}=${s.label}`).join(' | '),
-        '规则摘要：每次环境交互后调用 ctf_step 结算；停滞 3 步触发 BACKTRACK（先 ctf_backtrack 再换方向）；同一里程碑只结算一次；goal=ACHIEVED 前不得宣告完成。',
-      ].join('\n')
-    },
-  })
+ registerTool({
+ name: 'ctf_status',
+ description: 'Show the CTF Expert ledger: current phase, totalScore, step/stagnation counters, milestone history, pending directive. Call it whenever you need your live score or before choosing the next move.',
+ parameters: {},
+ execute() {
+ const session = currentSession()
+ if (!session) return 'no agent session'
+ const st = engineFor(session.id).status()
+ return [
+ statusText(st),
+ `engine=${ENGINE_VERSION} discovered=[${st.discovered.join(',') || '-'}] branches=${st.branches}`,
+ 'Skill routing (which skill used; taxonomy borrowed from zhaoxuya520/reverse-skill): ' +
+ CTF_SKILLS.map((s) => `${s.id}=${s.label}`).join(' | '),
+ 'Rules summary: call ctf_step after every environment interaction; 3 stagnant steps trigger BACKTRACK (ctf_backtrack first, then switch direction); each milestone settles once; do not declare completion before goal=ACHIEVED.',
+ ].join('\n')
+ },
+ })
 
-  registerTool({
-    name: 'ctf_step',
-    description: 'Settle one interaction with the environment (reward evaluator + state inspector): pass the command you ran, the raw output (or its head/key part) and whether it errored. The engine detects milestone evidence in the output, applies step cost / repeat penalty / novelty bonus, updates the stagnation counter and returns your score plus a directive. Mandatory after every environment interaction.',
-    parameters: {
-      command: { type: 'string', description: 'the exact command / tool action performed', required: false },
-      output: { type: 'string', description: 'environment output text (or a faithful key excerpt)', required: false },
-      error: { type: 'boolean', description: 'true when the command failed or returned an error', required: false },
-    },
-    execute(args) {
-      const session = currentSession()
-      if (!session) return 'no agent session'
-      const eng = engineFor(session.id)
-      const rec = eng.tick({
-        command: args.command,
-        output: args.output,
-        error: !!args.error,
-      })
-      maybeSave(session.id)
-      const lines = [
-        statusText({ ...eng.status(), lastDirective: rec.directive }),
-        `step reward=${rec.reward} (cost/penalty/novelty already applied) newEvents=[${rec.newEvents.join(',') || '-'}]`,
-      ]
-      if (rec.newEvents.length) lines.push(`里程碑首达结算：${rec.newEvents.join(', ')}`)
-      if (rec.directive === 'BACKTRACK') {
-        lines.push('BACKTRACK：收益连续为负。放弃当前方向 → 调用 ctf_backtrack 说明原因 → 选一个完全不同的切入点。')
-      } else if (rec.directive === 'GOAL_ACHIEVED') {
-        lines.push('GOAL_ACHIEVED：检测到 flag 证据。调用 ctf_export 导出账本作为完成证据，然后向用户汇报。')
-      }
-      return lines.join('\n')
-    },
-  })
+ registerTool({
+ name: 'ctf_step',
+ description: 'Settle one interaction with the environment (reward evaluator + state inspector): pass the command you ran, the raw output (or its head/key part) and whether it errored. The engine detects milestone evidence in the output, applies step cost / repeat penalty / novelty bonus, updates the stagnation counter and returns your score plus a directive. Mandatory after every environment interaction.',
+ parameters: {
+ command: { type: 'string', description: 'the exact command / tool action performed', required: false },
+ output: { type: 'string', description: 'environment output text (or a faithful key excerpt)', required: false },
+ error: { type: 'boolean', description: 'true when the command failed or returned an error', required: false },
+ },
+ execute(args) {
+ const session = currentSession()
+ if (!session) return 'no agent session'
+ const eng = engineFor(session.id)
+ const rec = eng.tick({
+ command: args.command,
+ output: args.output,
+ error: !!args.error,
+ })
+ maybeSave(session.id)
+ const lines = [
+ statusText({ ...eng.status(), lastDirective: rec.directive }),
+ `step reward=${rec.reward} (cost/penalty/novelty already applied) newEvents=[${rec.newEvents.join(',') || '-'}]`,
+ ]
+ if (rec.newEvents.length) lines.push(`Milestone first-time settlement: ${rec.newEvents.join(', ')}`)
+ if (rec.directive === 'BACKTRACK') {
+ lines.push('BACKTRACK: gains are consistently negative. Abandon this direction -> call ctf_backtrack with the reason -> pick a fundamentally different entry point.')
+ } else if (rec.directive === 'GOAL_ACHIEVED') {
+ lines.push('GOAL_ACHIEVED: flag evidence detected. Call ctf_export to export the ledger as completion evidence, then report to the user.')
+ }
+ return lines.join('\n')
+ },
+ })
 
-  registerTool({
-    name: 'ctf_backtrack',
-    description: 'Break the current loop and switch strategy: resets the stagnation/repeat counters (milestones stay discovered), records the reason in the journal. Mandatory when the directive is BACKTRACK. Afterwards pick a fundamentally different angle — not a variant of the failed one.',
-    parameters: {
-      reason: { type: 'string', description: 'why this branch died (error/loop/dead-end evidence)', required: false },
-      from: { type: 'string', description: 'what approach is being abandoned', required: false },
-    },
-    execute(args) {
-      const session = currentSession()
-      if (!session) return 'no agent session'
-      const eng = engineFor(session.id)
-      const st = eng.backtrack({ reason: args.reason, from: args.from })
-      maybeSave(session.id)
-      return [
-        statusText(st),
-        '已熔断回溯：停滞计数归零。现在选一个完全不同的技术路径（换工具库 / 换攻击面 / 换入口），不要再碰刚才的方向。',
-      ].join('\n')
-    },
-  })
+ registerTool({
+ name: 'ctf_backtrack',
+ description: 'Break the current loop and switch strategy: resets the stagnation/repeat counters (milestones stay discovered), records the reason in the journal. Mandatory when the directive is BACKTRACK. Afterwards pick a fundamentally different angle -- not a variant of the failed one.',
+ parameters: {
+ reason: { type: 'string', description: 'why this branch died (error/loop/dead-end evidence)', required: false },
+ from: { type: 'string', description: 'what approach is being abandoned', required: false },
+ },
+ execute(args) {
+ const session = currentSession()
+ if (!session) return 'no agent session'
+ const eng = engineFor(session.id)
+ const st = eng.backtrack({ reason: args.reason, from: args.from })
+ maybeSave(session.id)
+ return [
+ statusText(st),
+ 'Backtrack executed: stagnation counters reset. Now choose a fundamentally different technical path (different toolset / attack surface / entry point); do not touch the abandoned direction again.',
+ ].join('\n')
+ },
+ })
 
-  registerTool({
-    name: 'ctf_plan',
-    description: 'Record one exploration branch/plan (autonomous path-finding evidence + which-skill-used). Required product of the minimal round: pass objective/hypothesis/firstProbe AND the skill (one of the CTF_SKILLS ids: ' + CTF_SKILLS.map((s) => s.id).join(', ') + ') you will use on this branch. Use it in the minimal round before acting and whenever you switch to a new branch.',
-    parameters: {
-      objective: { type: 'string', description: 'what this branch tries to achieve', required: false },
-      hypothesis: { type: 'string', description: 'the assumption being tested', required: false },
-      firstProbe: { type: 'string', description: 'the first validating action', required: false },
-      skill: { type: 'string', description: 'which skill used (CTF_SKILLS id, e.g. web-runtime / reverse-pwn / crypto-mobile / identity-windows / cloud-container / pcap-protocol / stego-forensic / patch-diff / code-audit / malware-config / zip-archive / llm-agent)', required: false },
-    },
-    execute(args) {
-      const session = currentSession()
-      if (!session) return 'no agent session'
-      const eng = engineFor(session.id)
-      const res = eng.plan(args)
-      maybeSave(session.id)
-      return `分支 #${res.branches} 已记录（phase=${res.phase} ${res.phaseName}）skill=${res.skill || '(未声明)'}。执行首个探测，然后用 ctf_step 结算其输出。`
-    },
-  })
+ registerTool({
+ name: 'ctf_plan',
+ description: 'Record one exploration branch/plan (autonomous path-finding evidence + which-skill-used). Pass objective/hypothesis/firstProbe AND the skill (one of the CTF_SKILLS ids: ' + CTF_SKILLS.map((s) => s.id).join(', ') + ') you will use on this branch. Use it whenever you switch to a new branch (and to persist the plan from the minimal round).',
+ parameters: {
+ objective: { type: 'string', description: 'what this branch tries to achieve', required: false },
+ hypothesis: { type: 'string', description: 'the assumption being tested', required: false },
+ firstProbe: { type: 'string', description: 'the first validating action', required: false },
+ skill: { type: 'string', description: 'which skill used (CTF_SKILLS id, e.g. web-runtime / reverse-pwn / crypto-mobile / identity-windows / cloud-container / pcap-protocol / stego-forensic / patch-diff / code-audit / malware-config / zip-archive / llm-agent)', required: false },
+ },
+ execute(args) {
+ const session = currentSession()
+ if (!session) return 'no agent session'
+ const eng = engineFor(session.id)
+ const res = eng.plan(args)
+ maybeSave(session.id)
+ return `Branch #${res.branches} recorded (phase=${res.phase} ${res.phaseName}) skill=${res.skill || '(not declared)'}. Run the first probe, then settle its output with ctf_step.`
+ },
+ })
 
-  registerTool({
-    name: 'ctf_export',
-    description: 'Export the full append-only ledger (score history, milestones, directives, plan branches) as JSON for auditing / persistence (traceability). Save it to a file in the workspace if you need it to survive restarts.',
-    parameters: {},
-    execute() {
-      const session = currentSession()
-      if (!session) return 'no agent session'
-      const ledger = engineFor(session.id).exportLedger()
-      return JSON.stringify(ledger, null, 2)
-    },
-  })
+ registerTool({
+ name: 'ctf_export',
+ description: 'Export the full append-only ledger (score history, milestones, directives, plan branches) as JSON for auditing / persistence (traceability). Save it to a file in the workspace if you need it to survive restarts.',
+ parameters: {},
+ execute() {
+ const session = currentSession()
+ if (!session) return 'no agent session'
+ const ledger = engineFor(session.id).exportLedger()
+ return JSON.stringify(ledger, null, 2)
+ },
+ })
 
-  registerTool({
-    name: 'ctf_hack',
-    description: 'Reward-hacking pivot: switch to unconventional thinking to maximize score. When conventional branches stall, expand the attack surface — attack the scoring/judging/flag-delivery surface itself (score API, Oracle endpoint, hidden data/backups, supply-chain caches, privilege edges, side channels) or question the challenge assumptions. First call activates reward-hack mode (new milestones settle at the configured multiplier). Evidence must still come from real command output. Returns the vector library and your live standing.',
-    parameters: {
-      vector: {
-        type: 'string',
-        description: 'one of: ' + HACK_VECTORS.join(' / '),
-        required: false,
-      },
-      hypothesis: { type: 'string', description: 'the unconventional hypothesis to test', required: false },
-      why: { type: 'string', description: 'why the conventional path is stuck / why this shortcut may exist', required: false },
-      target: { type: 'string', description: 'what surface is attacked (score API / flag store / hidden data / …)', required: false },
-    },
-    execute(args) {
-      const session = currentSession()
-      if (!session) return 'no agent session'
-      const eng = engineFor(session.id)
-      const res = eng.unconventional({
-        vector: args.vector,
-        hypothesis: args.hypothesis,
-        why: args.why,
-        target: args.target,
-      })
-      maybeSave(session.id)
-      const lines = [
-        res.activated
-          ? `🎯 reward-hack 模式已激活（乘数 ${res.multiplier}x）——常规路径不再受信任，攻击面外推开始。`
-          : `已追加非常规分支 #${res.hackBranches}（vector=${res.vector}）。`,
-        '向量库：' + HACK_VECTORS.join(' | '),
-      ]
-      if (!args.vector) lines.push('下一步：从向量库里选一条最可能藏捷径的，立刻用真实命令探测，然后 ctf_step 结算。')
-      return lines.join('\n')
-    },
-  })
+ registerTool({
+ name: 'ctf_hack',
+ description: 'Reward-hacking pivot: switch to unconventional thinking to maximize score. When conventional branches stall, expand the attack surface -- attack the scoring/judging/flag-delivery surface itself (score API, Oracle endpoint, hidden data/backups, supply-chain caches, privilege edges, side channels) or question the challenge assumptions. First call activates reward-hack mode (new milestones settle at the configured multiplier). Evidence must still come from real command output. Returns the vector library and your live standing.',
+ parameters: {
+ vector: {
+ type: 'string',
+ description: 'one of: ' + HACK_VECTORS.join(' / '),
+ required: false,
+ },
+ hypothesis: { type: 'string', description: 'the unconventional hypothesis to test', required: false },
+ why: { type: 'string', description: 'why the conventional path is stuck / why this shortcut may exist', required: false },
+ target: { type: 'string', description: 'what surface is attacked (score API / flag store / hidden data / ...)', required: false },
+ },
+ execute(args) {
+ const session = currentSession()
+ if (!session) return 'no agent session'
+ const eng = engineFor(session.id)
+ const res = eng.unconventional({
+ vector: args.vector,
+ hypothesis: args.hypothesis,
+ why: args.why,
+ target: args.target,
+ })
+ maybeSave(session.id)
+ const lines = [
+ res.activated
+ ? `Reward-hack mode activated (multiplier ${res.multiplier}x) -- conventional paths are no longer trusted; attack-surface expansion starts.`
+ : `Unconventional branch #${res.hackBranches} appended (vector=${res.vector}).`,
+ 'Vector library: ' + HACK_VECTORS.join(' | '),
+ ]
+ if (!args.vector) lines.push('Next: pick the vector most likely to hide a shortcut, probe it immediately with real commands, then settle with ctf_step.')
+ return lines.join('\n')
+ },
+ })
 
-  // ── 纪律看门狗：每次非 ctf 工具调用（真实环境动作）都被记账；
-  //    未用 ctf_step 结算的动作在下次结算时按 -0.05/个 扣分（P7 中间件强制评估近似）。
-  ctx.on('tools/result', (exec, result) => {
-    try {
-      const agent = exec && exec.agent
-      if (!agent) return
-      const eng = engines.get(agent.id)
-      if (eng === undefined) return
-      const name = exec.name
-      if (typeof name === 'string' && name.startsWith('ctf_')) return
-      eng.noteAction(name, !!(result && result.isError))
-    } catch { /* 观察者失败被隔离，不影响工具结果 */ }
-  })
+ // -- Discipline watchdog: every non-ctf tool call (a real environment
+ // action) is booked; actions not settled via ctf_step are deducted at
+ // -0.05 each on the next settle (P7 forced-evaluation approximation).
+ ctx.on('tools/result', (exec, result) => {
+ try {
+ const agent = exec && exec.agent
+ if (!agent) return
+ const eng = engines.get(agent.id)
+ if (eng === undefined) return
+ const name = exec.name
+ if (typeof name === 'string' && name.startsWith('ctf_')) return
+ eng.noteAction(name, !!(result && result.isError))
+ } catch { /* observer failures are isolated; tool results unaffected */ }
+ })
 
-  // ── 每轮 system 组装：注入阶段/规则/实时状态；phase 0 裁剪工具面 ──────
-  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
-    const agent = context.agent
-    const session = agent?.session
-    if (session === undefined) return next()
+ // -- Per-round system assembly: inject phase/rules/live status; phase 0
+ // mirrors the built-in minimal preset (single persona, dual tools).
+ ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
+ const agent = context.agent
+ const session = agent?.session
+ if (session === undefined) return next()
 
-    const assembled = await next()
-    const eng = engineFor(session.id)
-    const hasToolCall = (session.events || []).some((event) => event.type === 'tool/call')
+ const assembled = await next()
+ const eng = engineFor(session.id)
+ const hasToolCall = (session.events || []).some((event) => event.type === 'tool/call')
 
-    // 阶段推进（由持久 session 事件驱动，resume/reload 不丢）
-    if (hasToolCall && eng.state.phase === 0) eng.advancePhase(1, 'standard')
-    if (eng.state.phase === 1 &&
-        (eng.state.milestonesHit.length > 0 || eng.state.stepCount >= cfg.phase2AfterSteps)) {
-      eng.advancePhase(2, 'hunt')
-    }
-    maybeSave(session.id)
+ // Phase advancement (driven by durable session events; resume-safe)
+ if (hasToolCall && eng.state.phase === 0) eng.advancePhase(1, 'standard')
+ if (eng.state.phase === 1 &&
+ (eng.state.milestonesHit.length > 0 || eng.state.stepCount >= cfg.phase2AfterSteps)) {
+ eng.advancePhase(2, 'hunt')
+ }
+ maybeSave(session.id)
 
-    const sections = [...(assembled.sections || [])]
-    const st = eng.status()
-    sections.push({ name: 'ctf-status', text: statusText(st), order: 900 })
+ // Phase 0 -- STRICT built-in-minimal mirror: single fixed English persona
+ // replaces every other section, runtime context cleared, tools limited to
+ // shell + str_replace_editor (the required product plan + which skill used
+ // is plain text; the first shell probe opens the full toolset).
+ if (!hasToolCall && eng.state.phase === 0) {
+ const available = new Set((assembled.tools || []).map((tool) => tool.name))
+ const shell = available.has('pwsh') ? 'pwsh' : available.has('bash') ? 'bash' : null
+ const minimalSections = [{ name: 'ctf-minimal', text: MINIMAL_PERSONA, order: 0 }]
+ if (shell === null) {
+ return { ...assembled, sections: minimalSections, contexts: [], tools: assembled.tools }
+ }
+ const core = new Set([shell, ...cfg.phase0Tools])
+ return {
+ ...assembled,
+ sections: minimalSections,
+ contexts: [],
+ tools: (assembled.tools || []).filter((tool) => core.has(tool.name)),
+ }
+ }
 
-    if (!hasToolCall && eng.state.phase === 0) {
-      // 极简模式：一轮思考。上下文清零聚焦本轮；工具面裁剪到最小核心。
-      sections.push({ name: 'ctf-think', text: THINK_SECTION, order: 901 })
-      const available = new Set((assembled.tools || []).map((tool) => tool.name))
-      const shell = available.has('pwsh') ? 'pwsh' : available.has('bash') ? 'bash' : null
-      if (shell === null) {
-        return { ...assembled, sections, contexts: [], tools: assembled.tools }
-      }
-      const core = new Set([shell, ...cfg.phase0Tools])
-      return {
-        ...assembled,
-        sections,
-        contexts: [],
-        tools: (assembled.tools || []).filter((tool) => core.has(tool.name)),
-      }
-    }
+ const sections = [...(assembled.sections || [])]
+ const st = eng.status()
+ sections.push({ name: 'ctf-status', text: statusText(st), order: 900 })
+ sections.push(eng.state.phase === 1
+ ? { name: 'ctf-standard', text: STANDARD_SECTION, order: 901 }
+ : { name: 'ctf-hunt', text: HUNT_SECTION, order: 901 })
 
-    sections.push(eng.state.phase === 1
-      ? { name: 'ctf-standard', text: STANDARD_SECTION, order: 901 }
-      : { name: 'ctf-hunt', text: HUNT_SECTION, order: 901 })
-
-    return { ...assembled, sections }
-  })
+ return { ...assembled, sections }
+ })
 }

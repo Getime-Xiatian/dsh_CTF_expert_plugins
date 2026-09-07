@@ -1,2 +1,2 @@
 name: CTF Expert
-description: "Reward-driven autonomous CTF agent (CVE repro / PoC / exploit). 极简一轮思考 → 标准全工具 → 奖惩/熔断攻坚: layered milestone+curiosity rewards, step/repeat penalties, stagnation BACKTRACK loop-break, append-only score ledger (ctf_* tools)."
+description: "Reward-driven autonomous CTF agent (CVE repro / PoC / exploit). Phases: built-in minimal mode (one English planning round: plan + which skill used) -> standard full toolset -> reward/penalty hunt with loop-break. Layered milestone+curiosity rewards, step/repeat penalties, stagnation BACKTRACK, append-only hashed score ledger, reward-hack pivot, final-goal guarantee (ctf_* tools). All prompts in English."

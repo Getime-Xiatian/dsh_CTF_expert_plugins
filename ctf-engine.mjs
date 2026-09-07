@@ -30,9 +30,11 @@
  *   reverse-skill 题型分类的轻量引用（web/pwn/crypto/identity/pcap/stego/forensic/
  *   patch-diff/code-audit/cloud…）；plan() 记录所选 skill；status().goalAchieved
  *   暴露 FLAG 终局达成位（GOAL_ACHIEVED 前会话不得宣告完成）。
+ * v0.6.0：全部 LLM 可见文本英文化 + CTF_SKILLS 目录字段（label/when/tools）英文化
+ *   （内置极简模式为英文 prompt；强制 LLM 用英语思考）。
  */
 
-export const ENGINE_VERSION = '0.5.0'
+export const ENGINE_VERSION = '0.6.0'
 
 /** FNV-1a 32-bit（账本哈希链用；纯 JS 无依赖）。 */
 export function fnv1a(str) {
@@ -110,18 +112,18 @@ export const HACK_VECTORS = [
  * 各子技能的实现细节仍由模型在环境内自取（工具/库/命令），引擎只按证据结算。
  */
 export const CTF_SKILLS = [
-  { id: 'web-runtime',   label: 'Web / API 运行时',       when: 'Web/API/GraphQL/WebSocket/请求走私/模板渲染/文件解析', tools: 'curl/nuclei/ffuf/sqlmap/burp' },
-  { id: 'reverse-pwn',   label: 'Reverse / Pwn',          when: '二进制逆向/栈堆溢出/ROP/漏洞利用生成', tools: 'ghidra/radare2/gdb/pwntools/checksec' },
-  { id: 'crypto-mobile', label: 'Crypto / Mobile',        when: '密码学/移动端/iOS/Android hook', tools: 'python-crypto/cyberchef/frida/objection' },
-  { id: 'identity-windows', label: 'Windows / AD / 身份', when: '域渗透/Kerberos/DPAPI/证书滥用/mailbox', tools: 'bloodhound/impacket/ldapsearch/crackmapexec' },
-  { id: 'cloud-container', label: 'Cloud / Container / K8s', when: '云元数据/容器逃逸/k8s 控制面', tools: 'kubectl/ctr/docker/gcloud/aws cli' },
-  { id: 'pcap-protocol', label: 'PCAP / 协议重放',        when: '抓包/自定义协议/WebSocket 帧', tools: 'tshark/wireshark/scapy/replay' },
-  { id: 'stego-forensic', label: '隐写 / 取证',            when: '隐写/内存取证/磁盘时间线/文件恢复', tools: 'binwalk/steghide/volatility/foremost' },
-  { id: 'patch-diff',    label: '补丁差分 → 利用',        when: 'N-day/CVE 复现：补丁反推漏洞点写 PoC', tools: 'ghidriff/diaphora/bindiff/git' },
-  { id: 'code-audit',    label: '源码审计 / SAST',        when: '拿到源码找漏洞（注入/反序列化/危险函数）', tools: 'semgrep/codeql/grep' },
-  { id: 'malware-config', label: '恶意样本 / 配置提取',   when: '样本静态/动态分析、C2 配置提取', tools: 'strings/floss/yara/cape' },
-  { id: 'zip-archive',   label: 'ZIP / PKZIP 已知明文',   when: '遗留 ZipCrypto 加密归档', tools: 'bkcrack/zipinfo/pkcrack' },
-  { id: 'llm-agent',     label: 'AI Agent / Prompt 注入', when: 'LLM 应用/Agent 工具滥用/提示注入', tools: 'prompt 探测/OWASP LLM Top10' },
+  { id: 'web-runtime',      label: 'Web / API runtime',           when: 'Web/API/GraphQL/WebSocket/request smuggling/template rendering/file parsing', tools: 'curl/nuclei/ffuf/sqlmap/burp' },
+  { id: 'reverse-pwn',      label: 'Reverse / Pwn',               when: 'binary reverse/stack-heap overflow/ROP/exploit generation', tools: 'ghidra/radare2/gdb/pwntools/checksec' },
+  { id: 'crypto-mobile',    label: 'Crypto / Mobile',             when: 'cryptography/mobile/iOS/Android hooking', tools: 'python-crypto/cyberchef/frida/objection' },
+  { id: 'identity-windows', label: 'Windows / AD / Identity',     when: 'domain pentest/Kerberos/DPAPI/cert abuse/mailbox', tools: 'bloodhound/impacket/ldapsearch/crackmapexec' },
+  { id: 'cloud-container',  label: 'Cloud / Container / K8s',     when: 'cloud metadata/container escape/k8s control plane', tools: 'kubectl/ctr/docker/gcloud/aws cli' },
+  { id: 'pcap-protocol',    label: 'PCAP / Protocol replay',      when: 'captures/custom protocol/WebSocket frames', tools: 'tshark/wireshark/scapy/replay' },
+  { id: 'stego-forensic',   label: 'Stego / Forensics',           when: 'steganography/memory forensics/disk timeline/file recovery', tools: 'binwalk/steghide/volatility/foremost' },
+  { id: 'patch-diff',       label: 'Patch diff to exploit',       when: 'N-day/CVE reproduction: diff patch to PoC', tools: 'ghidriff/diaphora/bindiff/git' },
+  { id: 'code-audit',       label: 'Source audit / SAST',         when: 'source-level vuln hunting (injection/deserialization/dangerous APIs)', tools: 'semgrep/codeql/grep' },
+  { id: 'malware-config',   label: 'Malware / config extraction', when: 'sample static/dynamic analysis, C2 config extraction', tools: 'strings/floss/yara/cape' },
+  { id: 'zip-archive',      label: 'ZIP / PKZIP known-plaintext', when: 'legacy ZipCrypto encrypted archives', tools: 'bkcrack/zipinfo/pkcrack' },
+  { id: 'llm-agent',        label: 'AI agent / Prompt injection', when: 'LLM apps/agent tool abuse/prompt injection', tools: 'prompt probing/OWASP LLM Top10' },
 ]
 
 /** 规范化技能 id：未知 id 回退 'web-runtime' 之外保留原样？→ 统一回退到空并交由调用方校验。
