@@ -1,13 +1,19 @@
-# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.8.0）
+# CTF Expert — dsh CTF 能力插件 / Agent 预设（v0.8.1）
 
 > [English](README.md) | **简体中文**
 
 面向 dsh 的奖励驱动自主 CTF Agent：**CVE 复现 · PoC 验证 · exploit 生成**。
 为 Agent 预设 `CTF Expert` 提供一套**奖励惩罚机制**（专注最大得分）+ **自主探路** +
 **loop 熔断** + **技能路由（which skill used）** + **终局保证**（goal=ACHIEVED 前不得宣告完成）。
-**Round-1 协议（v0.8.0）**：极简深思考轮先产出 plan + which skill used（纯文本），由
+**Round-1 协议**：极简深思考轮先产出 plan + which skill used（纯文本），由
 **subagent 排查完善**后再解锁执行工具。
 插件所有 LLM 可见 prompt 均为英文，并在每个阶段强制 English thinking。
+
+> **v0.8.1 三修复（实测）**：① 极简产物步后经 `agent/turn-stopping` 自动唤醒进入 review
+> （旧版在 session/event 观察器内 append 被同会话重入拒绝，唤醒静默丢失）；② ctf_* 工具经
+> 运行时 `exec.agent.session` 绑定会话（旧版 "no agent session"）；③ 委托子代理
+> （origin=subagent / delegationDepth>0）跳过全部 CTF 协议——audit 子代理只回
+> verdict + deltas，不再复述整份 plan。
 
 ## 安装
 
@@ -88,7 +94,7 @@
   session/event 推进 + tools/result 看门狗 + 可选持久化）
 - 设计文档 / 测试 / 变更溯源（`TRACE.md`）在工作区 `/home/xiatian/default/ctf-expert/`
 
-## 状态（v0.8.0）
+## 状态（v0.8.1）
 
 - [x] 引擎（分层奖励 / 步成本 / 重复指数惩罚 / 停滞 BACKTRACK / 一次性里程碑 / flag 证据结算 / 快照恢复）
 - [x] 奖励黑客机制（`ctf_hack` + hackMode + 非常规攻击面向量库 + 乘数结算）
@@ -96,10 +102,10 @@
 - [x] 技能路由 + 终局保证（v0.5.0）
 - [x] **极简模式严格对齐内置 minimal + 全英文 prompt + 强制英语思考（v0.6.0）**
 - [x] **system 只注入内置 persona 一句，其余全部走用户提示词通道（v0.7.0）**
-- [x] **死循环修复 + Round-1 协议（v0.8.0：session/event 推进 + review 门控工具面锁 + ctf_review）**
+- [x] **死循环修复 + Round-1 协议（v0.8.0）** + **v0.8.1 三修复（自动唤醒/exec 会话绑定/子代理跳过协议）**
 - [x] 预设结构校验（31 rows，无重复 id）与真实挂载验证（standingKeyFor = MOUNT OK）
 - [ ] 最终验收：用户在 picker 开 CTF Expert 会话，确认 round-1 产物 → subagent 排查 → 执行 全链路
-- [x] 发布：代码已 push 到本仓库 `main`（v0.8.0，commit `d8ed52d`）
+- [x] 发布：代码已 push 到本仓库 `main`（v0.8.1 待推送）
 
 ## 测试
 

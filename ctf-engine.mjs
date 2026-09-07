@@ -35,9 +35,10 @@
  * v0.8.0：round-1 协议 —— 极简一轮思考产物（plan + which skill used）产出后先由
  *   subagent 排查完善（productDelivered / reviewState 门控），完善后才解锁执行；
  *   引擎只记账门控状态，tick 奖励数学不变（执行门控由 bootstrap 工具面实施）。
+ * v0.8.1：插件版本随 bootstrap 修复对齐（本文件逻辑未变）。
  */
 
-export const ENGINE_VERSION = '0.8.0'
+export const ENGINE_VERSION = '0.8.1'
 
 /** FNV-1a 32-bit（账本哈希链用；纯 JS 无依赖）。 */
 export function fnv1a(str) {

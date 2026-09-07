@@ -1,4 +1,4 @@
-# CTF Expert - dsh CTF 能力插件 / Agent 预设 (v0.8.0)
+# CTF Expert - dsh CTF 能力插件 / Agent 预设 (v0.8.1)
 
 > **English** | [简体中文](README.zh-CN.md)
 
@@ -60,6 +60,18 @@ picker.
 
 Status lines carry `review=PENDING|DONE` and `product=DELIVERED`; while the
 review gate is pending the phase label reads `1(review)`.
+
+v0.8.1 fixes (measured on real CTF sessions): (1) the review-gate wake now
+fires from the `agent/turn-stopping` hook -- the old wake ran inside a
+`session/event` observer where a same-session inbox append is reentrancy-
+blocked, so the agent idled after the plan text until the user typed
+"continue"; (2) ctf_* tools bind the session via the tools-runtime
+`exec.agent.session` argument (previously "no agent session" because the
+per-session `agent` service is not resolvable from the preset standing
+scope); (3) delegated (subagent) children now skip ALL CTF protocol/guidance
+(`isDelegated()`: origin=subagent / delegationDepth>0), so the plan-audit
+subagent returns a concise verdict with deltas instead of re-outputting the
+plan, and the audit prompt demands deltas only.
 
 Why v0.8.0 exists: a measured CTF session dead-looped in phase 0 (the agent
 probed forever, never emitting the plan) because phase promotion read

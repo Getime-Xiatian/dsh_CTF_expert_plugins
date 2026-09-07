@@ -57,6 +57,23 @@
  *   review=DONE do execution tools unlock (shell/file locked in the review
  *   gate, so "execute only after the plan is perfected" is enforced by the
  *   tool surface, not just by prompt).
+ * v0.8.1: three measured follow-up fixes on real CTF sessions --
+ *   1. auto-continue into the review gate after the round-1 text product: the
+ *      wake inbox.append() ran inside a `session/event` observer, where a
+ *      same-session append is reentrancy-blocked, so the wake was silently
+ *      lost (the user had to type "continue"). The wake now fires from the
+ *      `agent/turn-stopping` hook (agent event, no session reentrancy).
+ *   2. ctf_* tools returned "no agent session": tool bodies execute in the
+ *      preset standing scope, where the per-session `agent` service is not
+ *      resolvable via ctx.get('agent'). Tools now read exec.agent.session from
+ *      the tools-runtime second argument (deterministic per call) and fall
+ *      back to the last assembled agent.
+ *   3. the plan-audit subagent repeated the plan: delegated (subagent) children
+ *      inherit this preset, so the CTF round-1 protocol was injected into the
+ *      child and made it re-output a plan. Bootstrap now skips ALL CTF
+ *      protocol/guidance/tool-gating for delegated sessions (origin=subagent /
+ *      delegationDepth>0), keeping them plain workers; the audit prompt also
+ *      demands a concise verdict with deltas, not a plan restatement.
  */
 
 import { createEngine, ENGINE_VERSION, HACK_VECTORS, CTF_SKILLS } from './ctf-engine.mjs'
@@ -140,7 +157,9 @@ const REVIEW_GUIDE = [
   '   false. Give it the challenge facts you have plus your full plan + which',
   '   skill used, and instruct it to AUDIT and PERFECT the plan: holes in the',
   '   hypothesis, a sharper/better first probe, a more precise milestone, and',
-  '   whether the chosen skill is the narrowest fit. Wait for its report.',
+  '   whether the chosen skill is the narrowest fit. Tell it to return ONLY a',
+  '   concise audit (verdict + concrete deltas), never a restatement of the plan.',
+  '   Wait for its report.',
   '4. Fold the findings into your plan and call ctf_review (review=DONE unlocks',
   '   the execution tools).',
   'Do NOT run shell/file/probing tools and do NOT settle steps before review=DONE.',
@@ -158,6 +177,8 @@ const REVIEW_WAKE = [
   '2. Dispatch ONE subagent (subagent tool, run_in_background: false) with your',
   '   plan + which skill used; ask it to audit and perfect the plan (holes in',
   '   the hypothesis, a better first probe, a sharper milestone, skill fit).',
+  '   Tell it to return ONLY a concise audit (verdict + concrete deltas), never',
+  '   a restatement of the plan.',
   '3. Fold its findings into the plan and call ctf_review to unlock execution.',
   'Then run the first probe and settle its output with ctf_step.',
 ].join('\n')
@@ -275,6 +296,7 @@ export function apply(ctx, config = {}) {
   cfg.phase0Tools = [...(cfg.phase0Tools || DEFAULTS.phase0Tools)]
   const engines = new Map() // session.id -> engine
   const agents = new Map() // session.id -> live Agent handle (in-process only)
+  const pendingWake = new Map() // session.id -> round-1 text product just delivered (wake due)
 
   /**
    * Durable event access that tolerates both runtime shapes: some hosts hand
@@ -368,9 +390,37 @@ export function apply(ctx, config = {}) {
     return eng
   }
 
+  /**
+   * v0.8.1: delegated (subagent) children inherit this preset but must stay
+   * plain workers -- no CTF round-1/review protocol, no engine, no tool gating.
+   * Session header carries origin='subagent' and delegationDepth = parent+1.
+   */
+  function isDelegated(session) {
+    const h = session && session.header
+    if (!h) return false
+    return h.origin === 'subagent' || Number(h.delegationDepth || 0) > 0
+  }
+
   function currentSession() {
     const agent = ctx.get('agent')
-    return agent?.session
+    if (agent !== undefined && agent.session !== undefined) return agent.session
+    // v0.8.1: ctf_* tool bodies execute in the preset standing scope, where
+    // the per-session `agent` service is NOT resolvable via ctx.get('agent')
+    // ("no agent session"). Fall back to the last agent this preset assembled
+    // (single-active-session case; router-standard uses the same fallback).
+    const last = [...agents.values()].at(-1)
+    return last?.session
+  }
+
+  /**
+   * Deterministic per-call binding (v0.8.1): the tools runtime invokes the
+   * registered body as execute(arguments, exec), where exec carries the
+   * executing agent (tools/src dispatchToolBody). Prefer it over ctx.get.
+   */
+  function sessionFor(exec) {
+    const agent = exec && exec.agent
+    if (agent !== undefined && agent.session !== undefined) return agent.session
+    return currentSession()
   }
 
   // -- Tool registration (same zero-dep pattern as router-bootstrap) ----
@@ -399,8 +449,8 @@ export function apply(ctx, config = {}) {
     name: 'ctf_status',
     description: 'Show the CTF Expert ledger: current phase, totalScore, step/stagnation counters, milestone history, pending directive. Call it whenever you need your live score or before choosing the next move.',
     parameters: {},
-    execute() {
-      const session = currentSession()
+    execute(_args, exec) {
+      const session = sessionFor(exec)
       if (!session) return 'no agent session'
       const st = engineFor(session.id).status()
       return [
@@ -421,8 +471,8 @@ export function apply(ctx, config = {}) {
       output: { type: 'string', description: 'environment output text (or a faithful key excerpt)', required: false },
       error: { type: 'boolean', description: 'true when the command failed or returned an error', required: false },
     },
-    execute(args) {
-      const session = currentSession()
+    execute(args, exec) {
+      const session = sessionFor(exec)
       if (!session) return 'no agent session'
       const eng = engineFor(session.id)
       const rec = eng.tick({
@@ -452,8 +502,8 @@ export function apply(ctx, config = {}) {
       reason: { type: 'string', description: 'why this branch died (error/loop/dead-end evidence)', required: false },
       from: { type: 'string', description: 'what approach is being abandoned', required: false },
     },
-    execute(args) {
-      const session = currentSession()
+    execute(args, exec) {
+      const session = sessionFor(exec)
       if (!session) return 'no agent session'
       const eng = engineFor(session.id)
       const st = eng.backtrack({ reason: args.reason, from: args.from })
@@ -474,8 +524,8 @@ export function apply(ctx, config = {}) {
       firstProbe: { type: 'string', description: 'the first validating action', required: false },
       skill: { type: 'string', description: 'which skill used (CTF_SKILLS id, e.g. web-runtime / reverse-pwn / crypto-mobile / identity-windows / cloud-container / pcap-protocol / stego-forensic / patch-diff / code-audit / malware-config / zip-archive / llm-agent)', required: false },
     },
-    execute(args) {
-      const session = currentSession()
+    execute(args, exec) {
+      const session = sessionFor(exec)
       if (!session) return 'no agent session'
       const eng = engineFor(session.id)
       const res = eng.plan(args)
@@ -490,8 +540,8 @@ export function apply(ctx, config = {}) {
     parameters: {
       verdict: { type: 'string', description: 'subagent review outcome / what was improved in the plan', required: false },
     },
-    execute(args) {
-      const session = currentSession()
+    execute(args, exec) {
+      const session = sessionFor(exec)
       if (!session) return 'no agent session'
       const eng = engineFor(session.id)
       const st = eng.review({ verdict: args.verdict })
@@ -507,8 +557,8 @@ export function apply(ctx, config = {}) {
     name: 'ctf_export',
     description: 'Export the full append-only ledger (score history, milestones, directives, plan branches) as JSON for auditing / persistence (traceability). Save it to a file in the workspace if you need it to survive restarts.',
     parameters: {},
-    execute() {
-      const session = currentSession()
+    execute(_args, exec) {
+      const session = sessionFor(exec)
       if (!session) return 'no agent session'
       const ledger = engineFor(session.id).exportLedger()
       return JSON.stringify(ledger, null, 2)
@@ -528,8 +578,8 @@ export function apply(ctx, config = {}) {
       why: { type: 'string', description: 'why the conventional path is stuck / why this shortcut may exist', required: false },
       target: { type: 'string', description: 'what surface is attacked (score API / flag store / hidden data / ...)', required: false },
     },
-    execute(args) {
-      const session = currentSession()
+    execute(args, exec) {
+      const session = sessionFor(exec)
       if (!session) return 'no agent session'
       const eng = engineFor(session.id)
       const res = eng.unconventional({
@@ -570,9 +620,17 @@ export function apply(ctx, config = {}) {
     } catch { /* observer failures are isolated; tool results unaffected */ }
   })
 
-  // -- Durable-event wake (v0.8.0): after the phase-0 text-only round delivers
-  // the plan product, keep the SAME turn going into the review gate instead of
-  // idling for the user (agent-loop continues when inbox.nextStep is non-empty).
+  // -- Durable-event wake (v0.8.0/v0.8.1): after the phase-0 text-only round
+  // delivers the plan product, keep the SAME turn going into the review gate
+  // instead of idling for the user (agent-loop continues when inbox.nextStep
+  // is non-empty). v0.8.1: the append must NOT run inside a `session/event`
+  // observer -- inbox.append() durably appends `agent/inbox/spliced` to the
+  // same session, which is reentrancy-blocked while that observer is inside
+  // session.append() (core/session "session append cannot reenter"), so the
+  // wake was silently lost. It now fires from `agent/turn-stopping`, an agent
+  // event dispatched right before the break decision, where a session append
+  // is legal and the appended next-step message is seen by the loop's
+  // `inbox.nextStep` re-check (same turn continues).
   function wakeReview(session) {
     const agent = agents.get(session.id)
     if (agent === undefined || agent.inbox === undefined) return
@@ -595,9 +653,10 @@ export function apply(ctx, config = {}) {
   //     demands the round-1 product text before execution);
   //   * a phase-0 step ending with an assistant TEXT reply (the round-1
   //     product plan + which skill used) -> mark the product delivered,
-  //     advance to phase 1 and wake the review gate.
+  //     advance to phase 1 and arm the review-gate wake.
   ctx.on('session/event', (session, event) => {
     try {
+      if (isDelegated(session)) return // v0.8.1: subagent children stay plain
       const eng = engines.get(session.id)
       if (eng === undefined) return
       if (event == null) return
@@ -614,10 +673,27 @@ export function apply(ctx, config = {}) {
           const promoted = eng.advancePhase(1, 'standard')
           eng.markProduct()
           maybeSave(session.id)
-          if (promoted) wakeReview(session)
+          if (promoted) pendingWake.set(session.id, true)
         }
       }
     } catch { /* observer failures are isolated */ }
+  })
+
+  // -- Review-gate wake (v0.8.1): consumed at the turn-stop boundary, see
+  // wakeReview() above. Only wakes while the round-1 product was delivered and
+  // the review gate is still pending; any stale flag is dropped.
+  ctx.on('agent/turn-stopping', async ({ agent }) => {
+    try {
+      const session = agent && agent.session
+      if (session === undefined) return
+      if (isDelegated(session)) return // v0.8.1: subagent children stay plain
+      if (!pendingWake.get(session.id)) return
+      const eng = engines.get(session.id)
+      if (eng === undefined) return
+      const wakeDue = eng.state.phase === 1 && eng.state.reviewState !== 'done' && eng.state.productDelivered
+      pendingWake.delete(session.id)
+      if (wakeDue) wakeReview(session)
+    } catch { /* observer failures must never break the turn-stopping chain */ }
   })
 
   // -- Per-round prompt assembly (v0.7.0 contract) ------------------------
@@ -630,6 +706,8 @@ export function apply(ctx, config = {}) {
     const agent = context.agent
     const session = agent?.session
     if (session === undefined) return next()
+    // v0.8.1: delegated (subagent) children run plain -- no CTF protocol.
+    if (isDelegated(session)) return next()
     agents.set(session.id, agent)
 
     const assembled = await next()
