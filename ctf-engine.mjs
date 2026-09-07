@@ -32,9 +32,12 @@
  *   暴露 FLAG 终局达成位（GOAL_ACHIEVED 前会话不得宣告完成）。
  * v0.6.0：全部 LLM 可见文本英文化 + CTF_SKILLS 目录字段（label/when/tools）英文化
  *   （内置极简模式为英文 prompt；强制 LLM 用英语思考）。
+ * v0.8.0：round-1 协议 —— 极简一轮思考产物（plan + which skill used）产出后先由
+ *   subagent 排查完善（productDelivered / reviewState 门控），完善后才解锁执行；
+ *   引擎只记账门控状态，tick 奖励数学不变（执行门控由 bootstrap 工具面实施）。
  */
 
-export const ENGINE_VERSION = '0.6.0'
+export const ENGINE_VERSION = '0.8.0'
 
 /** FNV-1a 32-bit（账本哈希链用；纯 JS 无依赖）。 */
 export function fnv1a(str) {
@@ -178,6 +181,8 @@ export function createEngine(sessionId, overrides = {}) {
     hackBranches: [],       // ctf_hack 记录的非常规分支
     hackBreakthroughs: 0,   // reward-hack 模式下取得的新里程碑次数
     lastSkill: null,        // 最近一次 ctf_plan 声明的技能（"which skill used"）
+    productDelivered: false, // v0.8.0：极简一轮思考产物（plan+skill 文本）是否已交付
+    reviewState: 'pending', // v0.8.0：plan 的 subagent 排查门控 'pending' | 'done'
   }
 
   const norm = (cmd) => (cmd == null ? '' : String(cmd).replace(/\s+/g, ' ').trim())
@@ -230,6 +235,28 @@ export function createEngine(sessionId, overrides = {}) {
     state.phaseName = name
     pushJournal({ type: 'phase', from, to: nextPhase, name })
     return true
+  }
+
+  /**
+   * v0.8.0：登记极简一轮思考的产物已交付（bootstrap 在 phase 0 文本步结束时调用）。
+   * 只作账本记录：执行门控（reviewState）与工具面由 bootstrap 实施。
+   */
+  function markProduct() {
+    if (state.productDelivered) return false
+    state.productDelivered = true
+    pushJournal({ type: 'product', phase: state.phase })
+    return true
+  }
+
+  /**
+   * v0.8.0：subagent 排查完成 → reviewState='done'，解除执行门控。
+   * bootstrap 在 ctf_review 工具中调用；状态跨重启随 snapshot 保存。
+   */
+  function review({ verdict = '' } = {}) {
+    if (state.reviewState === 'done') return status()
+    state.reviewState = 'done'
+    pushJournal({ type: 'review', verdict: String(verdict).slice(0, 300) })
+    return status()
   }
 
   /**
@@ -419,6 +446,8 @@ export function createEngine(sessionId, overrides = {}) {
       chainValid: verifyChain(),
       lastSkill: state.lastSkill,                       // "which skill used"
       goalAchieved: state.discovered.includes('FLAG_RETRIEVED'), // 终局保证位
+      productDelivered: state.productDelivered,         // v0.8.0 round-1 产物门控
+      reviewState: state.reviewState,                   // v0.8.0 'pending' | 'done'
     }
   }
 
@@ -469,6 +498,8 @@ export function createEngine(sessionId, overrides = {}) {
       hackBranches: state.hackBranches.map((b) => ({ ...b })),
       hackBreakthroughs: state.hackBreakthroughs,
       lastSkill: state.lastSkill,
+      productDelivered: state.productDelivered,   // v0.8.0
+      reviewState: state.reviewState,             // v0.8.0
       config: {
         stepCost: cfg.stepCost, exploreBonus: cfg.exploreBonus,
         repeatBase: cfg.repeatBase, errorPenalty: cfg.errorPenalty,
@@ -509,6 +540,8 @@ export function createEngine(sessionId, overrides = {}) {
       state.hackBranches = Array.isArray(snap.hackBranches) ? snap.hackBranches.filter((b) => b && typeof b === 'object').map((b) => ({ ...b })) : []
       state.hackBreakthroughs = num(snap.hackBreakthroughs, 0)
       state.lastSkill = str(snap.lastSkill, null)
+      state.productDelivered = !!snap.productDelivered
+      state.reviewState = snap.reviewState === 'done' ? 'done' : 'pending'
       return true
     } catch {
       return false
@@ -519,6 +552,8 @@ export function createEngine(sessionId, overrides = {}) {
     state,
     cfg,
     advancePhase,
+    markProduct,
+    review,
     tick,
     backtrack,
     plan,

@@ -2,17 +2,20 @@
 # (CVE reproduction / PoC / exploit generation), cloned from
 # `router-standard` (2026-09-07) so the full Standard tool catalog is kept.
 #
-# Three phases per the requirement (极简 → 标准 → 奖惩), implemented by
-# `./ctf-bootstrap.mjs` on durable session events:
+# Three phases per the requirement (极简深思考 → subagent 排查 → 执行), implemented
+# by `./ctf-bootstrap.mjs` on durable session events (v0.8.0: `session/event`
+# hooks -- the old `session.events` scan never fired on the live Session):
 #
 #   phase 0 think     极简模式：first request carries ONLY shell + a minimal
-#                     core (str_replace_editor + ctf_* tools) and cleared
-#                     contexts — the model does ONE focused planning round
-#                     (专注于一轮思考) before acting.
-#   phase 1 standard  首个持久 tool/call 后开放完整 Standard 目录，注入
+#                     core (str_replace_editor) and cleared contexts — the model
+#                     does ONE deep-thinking round (专注于一轮思考), does NOT
+#                     call tools, and delivers plan + which skill used as text.
+#   phase 1 standard  review 门控先行：产物先由 subagent 排查完善（review=PENDING
+#                     时执行工具面锁死 = 仅 ctf_* + subagent 系；ctf_plan →
+#                     subagent → ctf_review 解锁），之后开放完整 Standard 目录 +
 #                     结算规矩（每次环境交互后必须 ctf_step 结算）。
-#   phase 2 hunt      首个里程碑或步数达标后：奖惩机制全文 + loop 熔断强化
-#                     + 失败轨迹上下文净化（见 ./ctf-engine.mjs 溯源注释）。
+#   phase 2 hunt      review=DONE 后首个里程碑或步数达标：奖惩机制全文 + loop 熔断
+#                     强化 + 失败轨迹上下文净化（见 ./ctf-engine.mjs 溯源注释）。
 #
 # Scoring/loop-break engine: `./ctf-engine.mjs` — 分层奖励（里程碑一次性 +
 # 好奇/探索 + 稀疏 flag）+ 惩罚（步成本 / 重复指数递增 / 无效调用）+ 停滞
@@ -57,10 +60,10 @@
   config:
     maxBytes: 65536
 
-# Reward/phase runtime: 极简一轮思考 → 标准全工具 → 奖惩/熔断攻坚。
-# Registers ctf_status / ctf_step / ctf_backtrack / ctf_plan / ctf_export
-# and gates the tool surface + prompt sections per phase (durable events,
-# resume-safe). Engine config (e.g. stagnantLimit) overridable here.
+# Reward/phase runtime: 极简深思考一轮 → subagent 排查（review 门控）→ 标准全工具 → 奖惩攻坚。
+# Registers ctf_status / ctf_step / ctf_backtrack / ctf_plan / ctf_review /
+# ctf_export / ctf_hack and gates the tool surface + prompt sections per phase
+# (durable events, resume-safe). Engine config (e.g. stagnantLimit) overridable here.
 # 账本跨重启持久化：给 persistDir 配一个绝对目录即启用（缺省 off = 仅内存），
 # 快照写入 <persistDir>/<sessionId>.json，重启后自动恢复：
 #   persistDir: /abs/path/to/ctf-ledgers
